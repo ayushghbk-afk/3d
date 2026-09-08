@@ -370,6 +370,30 @@ describe('generation (mocked network)', () => {
     expect(out.answer).toContain('0 objects');
     expect(out.projectId).toBe(projectId);
   });
+
+  it('ai.ask answers scene questions offline when the provider is down', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    );
+    const out = (await call('ai.ask', { projectId, question: 'how many objects?' })) as {
+      answer: string; offline: boolean;
+    };
+    expect(out.offline).toBe(true);
+    expect(out.answer).toContain('0 objects');
+  });
+
+  it('ai.ask surfaces a PROVIDER error when offline answering is impossible', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    );
+    await expectCode(call('ai.ask', { projectId, question: 'write a poem about cubes' }), 'PROVIDER');
+  });
 });
 
 describe('scene.* (AI understanding + full scene control)', () => {

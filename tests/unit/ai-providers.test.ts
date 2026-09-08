@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { buildPollinationsImageUrl, texturePrompt } from '../../src/ai/pollinations.js';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import {
+  PollinationsChatProvider,
+  buildPollinationsImageUrl,
+  flattenMessages,
+  texturePrompt,
+  unreachableChatError,
+} from '../../src/ai/pollinations.js';
 import { parseSseChunk } from '../../src/ai/providers.js';
 import { buildSpaceArgs, findGenerateFnIndex, isGlb, makeFileData, parseUploadPaths } from '../../src/ai/triposr.js';
 import { findSf3dDeps, parseRunButtonValue } from '../../src/ai/sf3d.js';
@@ -197,5 +203,93 @@ describe('AI settings', () => {
     expect(merged.agent.tokens).toHaveLength(1);
     expect(merged.agent.relayUrl).toBe('http://x');
     expect(merged.meshCustom.spaceUrl).toContain('hf.space');
+  });
+});
+
+describe('pollinations chat chain', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const chatJson = (content: string) => Response.json({ choices: [{ message: { content } }] });
+
+  it('uses the keyed gen API first when a key is configured', async () => {
+    const fetchMock = vi.fn(async () => chatJson('keyed answer'));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await new PollinationsChatProvider(undefined, 'sk_test').chat([
+      { role: 'user', content: 'hi' },
+    ]);
+    expect(out).toBe('keyed answer');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://gen.pollinations.ai/v1/chat/completions');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer sk_test');
+    expect(String((init as { body: string }).body)).toContain('"model":"openai"');
+  });
+
+  it('falls back from a dead POST to the legacy anonymous GET', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValueOnce(new Response('fallback answer', { status: 200 })),
+    );
+    const out = await new PollinationsChatProvider().chat([{ role: 'user', content: 'hi' }]);
+    expect(out).toBe('fallback answer');
+  });
+
+  it('falls back when POST returns an HTTP error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('busy', { status: 500 }))
+        .mockResolvedValueOnce(new Response('get answer', { status: 200 })),
+    );
+    const out = await new PollinationsChatProvider().chat([{ role: 'user', content: 'hi' }]);
+    expect(out).toBe('get answer');
+  });
+
+  it('tries the gen host anonymously before giving an actionable error', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(new PollinationsChatProvider().chat([{ role: 'user', content: 'hi' }])).rejects.toThrow(
+      /Couldn't reach the free Pollinations assistant/,
+    );
+    // legacy POST → legacy GET → gen GET, each naming its failure
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect((fetchMock.mock.calls[2] as [string])[0]).toContain('https://gen.pollinations.ai/text/');
+    try {
+      await new PollinationsChatProvider().chat([{ role: 'user', content: 'hi' }]);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect((e as Error).message).toContain('Setup');
+      expect((e as Error).message).toContain('text.pollinations.ai GET');
+    }
+  });
+
+  it('reports offline browsers distinctly', () => {
+    vi.stubGlobal('navigator', { onLine: false });
+    expect(unreachableChatError(['a: b']).message).toContain('offline');
+    vi.stubGlobal('navigator', { onLine: true });
+    expect(unreachableChatError(['a: b']).message).toContain("Couldn't reach");
+  });
+
+  it('flattens conversations with a length cap', () => {
+    const flat = flattenMessages([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'hello' },
+    ]);
+    expect(flat).toBe('System: sys\nUser: hello');
+    expect(flattenMessages([{ role: 'user', content: 'x'.repeat(99999) }]).length).toBeLessThanOrEqual(4000);
+  });
+
+  it('appends the user key to image URLs when set', () => {
+    expect(buildPollinationsImageUrl('cat', { key: 'sk_test' })).toContain('key=sk_test');
+    expect(buildPollinationsImageUrl('cat', {})).not.toContain('key=');
   });
 });

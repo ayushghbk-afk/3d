@@ -135,6 +135,48 @@ describe('AI panel', () => {
     }
   });
 
+  it('ask tab answers scene questions offline when the free AI is down', async () => {
+    const session = fakeSession();
+    session.addPrimitive('cube');
+    session.addPrimitive('sphere');
+    openAiPanel(session, 'ask');
+    await vi.waitFor(() => expect(document.querySelector('#aiask-go')).not.toBeNull());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    );
+    (tabBody().querySelector('#aiask-q') as HTMLInputElement).value = 'how many objects?';
+    (tabBody().querySelector('#aiask-go') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(tabBody().querySelector('.ai-msg-assistant')?.textContent).toContain('Offline answer'));
+    expect(tabBody().querySelector('.ai-msg-assistant')?.textContent).toContain('2 objects');
+  });
+
+  it('ask tab shows the provider error when the question needs real AI', async () => {
+    const session = fakeSession();
+    openAiPanel(session, 'ask');
+    await vi.waitFor(() => expect(document.querySelector('#aiask-go')).not.toBeNull());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    );
+    (tabBody().querySelector('#aiask-q') as HTMLInputElement).value = 'write a poem about cubes';
+    (tabBody().querySelector('#aiask-go') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(tabBody().querySelector('.ai-msg-assistant')?.textContent).toContain("Couldn't reach"));
+  });
+
+  it('saves the Pollinations key from Setup', async () => {
+    const session = fakeSession();
+    openAiPanel(session, 'settings');
+    await vi.waitFor(() => expect(document.querySelector('#ai-pollkey')).not.toBeNull());
+    (tabBody().querySelector('#ai-pollkey') as HTMLInputElement).value = 'sk_test123';
+    (tabBody().querySelector('#ai-save') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(aiSettings.get().pollinationsKey).toBe('sk_test123'));
+  });
+
   it('saves custom API settings', async () => {
     const session = fakeSession();
     openAiPanel(session);

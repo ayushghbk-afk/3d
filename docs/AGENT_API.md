@@ -186,7 +186,7 @@ Omit `projectId` to target the open project (live), or pass one from
 | `scene.tidy` | write | `{projectId?, spacing?}` → arrange top-level models in a grid |
 | `history.undo` / `history.redo` | write | live editor only |
 | `save.now` | write | `{projectId?}` → local + cloud (when signed in) |
-| `ai.ask` | generate | `{projectId?, question}` → grounded answer |
+| `ai.ask` | generate | `{projectId?, question}` → grounded answer (`offline:true` + local scene answer when the cloud AI is unreachable) |
 | `image.generate` | generate | `{prompt, width?, height?, seed?, strict?}` → `{dataUrl, …}` |
 | `texture.generate` | generate | `{projectId?, prompt, materialId?, size?, seamless?, strict?}` → applied to material (new one if omitted) |
 | `model.generate` | generate | `{projectId?, prompt, name?, quality?, model?, strict?}` → GLB imported; `quality`: fast/balanced/high; `model`: `sf3d` (best, default) or `triposr` (faster) |
@@ -213,7 +213,10 @@ Each slot is independent — mix free defaults with your own endpoints:
 - **Assistant** (`Ask` tab + `ai.ask`): OpenAI-compatible
   `POST {baseUrl}/chat/completions`. Works with OpenAI, Azure OpenAI,
   OpenRouter, Together, Ollama (`http://localhost:11434/v1`), LM Studio
-  (`http://localhost:1234/v1`), vLLM, …
+  (`http://localhost:1234/v1`), vLLM, … Before going custom, try the
+  **Pollinations key** field (free at enter.pollinations.ai/keys) — it keeps
+  the free assistant but routes it through the current keyed API, which
+  survives anonymous-tier blocks and throttling.
 - **Textures & images**: OpenAI-compatible `POST {baseUrl}/images/generations`
   (`b64_json` preferred, `url` accepted).
 - **3D models**: `POST {endpointUrl}` with `{model, prompt, format:"glb"}`;
@@ -252,4 +255,5 @@ unless `strict` is set.
 | Relay `TIMEOUT` | App tab open? Relay connected (green)? Long generations need bigger `timeoutMs`. |
 | Free 3D stuck on “waking…” | The HF Space sleeps when idle; first boot takes 1–3 min. Retry, or add a free `hf_…` token / use offline/custom 3D. |
 | Free texture 429 / slow | Anonymous Pollinations ≈ 1 req / 15s — wait and retry. |
+| Ask / `ai.ask` “Couldn't reach…” | The browser can't reach `*.pollinations.ai`: allow it in your ad-blocker/VPN/firewall, check DNS, or retry later. Adding a free Pollinations key (✨ AI → Setup) switches Ask to the current keyed API; a custom assistant endpoint also works. Counts/lists/summaries still answer offline. |
 | Custom API CORS errors | The endpoint must allow browser calls (`Access-Control-Allow-Origin`). Local Ollama/LM Studio work; some clouds need a proxy. |

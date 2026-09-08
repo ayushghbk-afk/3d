@@ -8,6 +8,8 @@ import { fetchWithTimeout, randomSeed, type ChatProvider, type ImageProvider } f
 
 export const POLLINATIONS_IMAGE_BASE = 'https://image.pollinations.ai';
 export const POLLINATIONS_TEXT_BASE = 'https://text.pollinations.ai';
+/** Current unified API (v0.3+): OpenAI-compatible chat + keyed GET endpoints. */
+export const POLLINATIONS_GEN_BASE = 'https://gen.pollinations.ai';
 export const POLLINATIONS_FREE_IMAGE_MODEL = 'flux';
 export const POLLINATIONS_FREE_CHAT_MODEL = 'openai';
 
@@ -18,6 +20,8 @@ export interface PollinationsImageParams {
   seed: number;
   nologo: boolean;
   referrer: string;
+  /** Optional user key (?key=) — raises anonymous limits where honored. */
+  key?: string;
 }
 
 /** Pure URL builder (unit-tested) for the free image endpoint. */
@@ -38,6 +42,7 @@ export function buildPollinationsImageUrl(
     nologo: params.nologo === false ? 'false' : 'true',
   });
   if (params.referrer) q.set('referrer', params.referrer);
+  if (params.key) q.set('key', params.key);
   return `${base.replace(/\/+$/, '')}/prompt/${encodeURIComponent(prompt.slice(0, 2000))}?${q.toString()}`;
 }
 
@@ -72,6 +77,11 @@ export class PollinationsImageProvider implements ImageProvider {
   id = 'pollinations';
   label = 'Pollinations Flux (free, no key)';
   free = true;
+  private apiKey?: string;
+
+  constructor(apiKey?: string) {
+    if (apiKey?.trim()) this.apiKey = apiKey.trim();
+  }
 
   async generateImage(prompt: string, opts: ImageGenOptions = {}): Promise<ImageGenResult> {
     const clean = prompt.trim().slice(0, 2000);
@@ -81,7 +91,7 @@ export class PollinationsImageProvider implements ImageProvider {
     const seed = opts.seed ?? randomSeed();
     const model = (opts.model || POLLINATIONS_FREE_IMAGE_MODEL).trim() || POLLINATIONS_FREE_IMAGE_MODEL;
     const referrer = typeof location !== 'undefined' ? location.host : 'web-3d-studio';
-    const url = buildPollinationsImageUrl(clean, { width, height, model, seed, referrer });
+    const url = buildPollinationsImageUrl(clean, { width, height, model, seed, referrer, key: this.apiKey });
     const blob = await downloadImage(url, 120000, opts.signal);
     return { blob, mime: blob.type || 'image/jpeg', width, height, seed, provider: this.id, prompt: clean };
   }
@@ -95,59 +105,139 @@ export class PollinationsImageProvider implements ImageProvider {
   }
 }
 
-/** Free chat via the OpenAI-compatible text endpoint, with legacy GET fallback. */
+/** Flatten a conversation for the plain-text GET endpoints (cap ±4k chars). */
+export function flattenMessages(messages: AgentMessage[]): string {
+  return messages
+    .map((m) => `${m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : 'System'}: ${m.content}`)
+    .join('\n')
+    .slice(-4000);
+}
+
+/**
+ * Actionable error when every chat endpoint failed. Distinguishes offline
+ * browsers from blocked/throttled hosts so the user knows what to try next.
+ */
+export function unreachableChatError(failures: string[]): Error {
+  const nav = globalThis.navigator as { onLine?: boolean } | undefined;
+  if (nav && nav.onLine === false) {
+    return new Error(
+      'You appear to be offline — reconnect and try Ask again. Factual scene questions (counts, lists) are answered offline in the meantime.',
+    );
+  }
+  return new Error(
+    `Couldn't reach the free Pollinations assistant (${failures.join(' · ') || 'network error'}). ` +
+      'Usual causes: an ad-blocker, VPN or firewall blocking pollinations.ai, ISP/DNS trouble, or the free tier being down. ' +
+      'Fixes: allow pollinations.ai in your blocker, retry in a bit, or add a free key in ✨ AI → Setup (Pollinations key) to use the current API. ' +
+      'Factual scene questions still get offline answers.',
+  );
+}
+
+/**
+ * Free chat with a 4-step chain:
+ * 1. current gen.pollinations.ai API with the user's key (when configured),
+ * 2. legacy anonymous OpenAI-compatible POST,
+ * 3. legacy anonymous GET (flattened conversation),
+ * 4. current API anonymous GET (different host — can work when legacy is
+ *    blocked on the user's network).
+ * Throws an actionable error naming every failed step when all are down.
+ */
 export class PollinationsChatProvider implements ChatProvider {
   id = 'pollinations-chat';
   label = 'Pollinations text (free, no key)';
   free = true;
   private model = POLLINATIONS_FREE_CHAT_MODEL;
+  private apiKey?: string;
 
-  constructor(model?: string) {
+  constructor(model?: string, apiKey?: string) {
     if (model?.trim()) this.model = model.trim();
+    if (apiKey?.trim()) this.apiKey = apiKey.trim();
   }
 
   async chat(messages: AgentMessage[], opts: ChatOptions = {}): Promise<string> {
     const model = (opts.model || this.model).trim() || POLLINATIONS_FREE_CHAT_MODEL;
-    const body = {
-      model,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })).slice(-20),
-      temperature: opts.temperature ?? 0.4,
-      max_tokens: opts.maxTokens ?? 800,
-      private: true,
-    };
-    // Primary: OpenAI-compatible POST.
-    try {
-      const res = await fetchWithTimeout(
-        `${POLLINATIONS_TEXT_BASE}/openai`,
-        {
-          method: 'POST',
-          signal: opts.signal,
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify(body),
-        },
-        90000,
-      );
-      if (res.ok) {
-        const json = (await res.json()) as {
-          choices?: { message?: { content?: string }; delta?: { content?: string } }[];
-        };
-        const text = json.choices?.[0]?.message?.content ?? json.choices?.[0]?.delta?.content ?? '';
-        if (text.trim()) return text.trim();
+    const failures: string[] = [];
+    const attempt = async (label: string, run: () => Promise<string>): Promise<string | null> => {
+      try {
+        const text = (await run()).trim();
+        if (text) return text;
+        failures.push(`${label}: empty reply`);
+      } catch (e) {
+        failures.push(`${label}: ${String((e as Error)?.message ?? e).slice(0, 140)}`);
       }
-    } catch {
-      /* fall through to legacy GET */
+      return null;
+    };
+
+    if (this.apiKey) {
+      const keyed = await attempt('gen.pollinations.ai (key)', () =>
+        this.postJson(
+          `${POLLINATIONS_GEN_BASE}/v1/chat/completions`,
+          { Authorization: `Bearer ${this.apiKey as string}` },
+          model,
+          messages,
+          opts,
+          90000,
+        ),
+      );
+      if (keyed) return keyed;
     }
-    // Fallback: legacy GET endpoint with the conversation flattened.
-    const flat = messages
-      .map((m) => `${m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : 'System'}: ${m.content}`)
-      .join('\n')
-      .slice(-4000);
-    const url = `${POLLINATIONS_TEXT_BASE}/${encodeURIComponent(flat)}?model=${encodeURIComponent(model)}&private=true`;
-    const res = await fetchWithTimeout(url, { signal: opts.signal, headers: { Accept: 'text/plain' } }, 90000);
-    if (!res.ok) throw new Error(`Pollinations text returned HTTP ${res.status}.`);
-    const text = (await res.text()).trim();
-    if (!text) throw new Error('Empty response from the free chat model.');
-    return text;
+    const posted = await attempt('text.pollinations.ai (anonymous)', () =>
+      this.postJson(`${POLLINATIONS_TEXT_BASE}/openai`, {}, model, messages, opts, 60000),
+    );
+    if (posted) return posted;
+
+    const flat = flattenMessages(messages);
+    const legacyGet = await attempt('text.pollinations.ai GET (anonymous)', async () => {
+      const url = `${POLLINATIONS_TEXT_BASE}/${encodeURIComponent(flat)}?model=${encodeURIComponent(model)}&private=true`;
+      const res = await fetchWithTimeout(url, { signal: opts.signal, headers: { Accept: 'text/plain' } }, 60000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.text()).trim();
+    });
+    if (legacyGet) return legacyGet;
+
+    const genGet = await attempt('gen.pollinations.ai GET (anonymous)', async () => {
+      const url = `${POLLINATIONS_GEN_BASE}/text/${encodeURIComponent(flat)}?model=${encodeURIComponent(model)}`;
+      const res = await fetchWithTimeout(url, { signal: opts.signal, headers: { Accept: 'text/plain' } }, 45000);
+      if (res.status === 401) throw new Error('needs an API key (free at enter.pollinations.ai/keys)');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.text()).trim();
+    });
+    if (genGet) return genGet;
+
+    throw unreachableChatError(failures);
+  }
+
+  private async postJson(
+    url: string,
+    extraHeaders: Record<string, string>,
+    model: string,
+    messages: AgentMessage[],
+    opts: ChatOptions,
+    timeoutMs: number,
+  ): Promise<string> {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        signal: opts.signal,
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...extraHeaders },
+        body: JSON.stringify({
+          model,
+          messages: messages.map((m) => ({ role: m.role, content: m.content })).slice(-20),
+          temperature: opts.temperature ?? 0.4,
+          max_tokens: opts.maxTokens ?? 800,
+          private: true,
+        }),
+      },
+      timeoutMs,
+    );
+    if (res.status === 401) throw new Error('API key rejected (401) — check the key in ✨ AI → Setup.');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as {
+      choices?: { message?: { content?: string }; delta?: { content?: string } }[];
+    };
+    const text = json.choices?.[0]?.message?.content ?? json.choices?.[0]?.delta?.content ?? '';
+    if (!text.trim()) throw new Error('empty reply');
+    return text.trim();
   }
 
   async test(): Promise<string> {

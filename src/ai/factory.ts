@@ -16,14 +16,14 @@ export function getChatProvider(s: AiSettings = aiSettings.get()): ChatProvider 
   if (s.assistantProvider === 'custom' && s.assistantCustom.baseUrl) {
     return new CustomChatProvider(s.assistantCustom);
   }
-  return new PollinationsChatProvider();
+  return new PollinationsChatProvider(undefined, s.pollinationsKey || undefined);
 }
 
 export function getImageProvider(s: AiSettings = aiSettings.get()): ImageProvider {
   if (s.imageProvider === 'custom' && s.imageCustom.baseUrl) {
     return new CustomImageProvider(s.imageCustom);
   }
-  return new PollinationsImageProvider();
+  return new PollinationsImageProvider(s.pollinationsKey || undefined);
 }
 
 function freeMeshProvider(model: FreeMeshModel, s: AiSettings, images: ImageProvider): MeshProvider {

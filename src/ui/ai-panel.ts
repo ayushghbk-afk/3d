@@ -12,6 +12,7 @@ import {
 import { generateImageSmart, generateMeshSmart, getChatProvider, getImageProvider, getMeshProvider } from '../ai/factory.js';
 import { texturePrompt } from '../ai/pollinations.js';
 import { getAgent, getRelay } from '../ai/index.js';
+import { answerLocally } from '../ai/local-answer.js';
 import type { AgentContext } from '../ai/agent-api.js';
 import type { IdentifiedGroup } from '../ai/scene-iq.js';
 import { bridgeStatus, snippetChannel, snippetCurlRelay, snippetJs, snippetPostMessage } from '../ai/bridge.js';
@@ -502,6 +503,13 @@ function renderPaintTab(session: EditorSession, body: HTMLElement): void {
 // Tab: Ask
 // =====================================================================
 
+/** First sentence of a provider error — keeps offline answers readable. */
+function shortReason(e: unknown): string {
+  const msg = (e as Error)?.message ?? String(e);
+  const first = msg.split(/[.。]\s/)[0] ?? msg;
+  return first.length > 160 ? `${first.slice(0, 157)}…` : first;
+}
+
 function renderAskTab(session: EditorSession, body: HTMLElement): void {
   body.innerHTML = `
     <div class="banner banner-info">Ask about <b>${escapeHtml(session.doc.name)}</b> — the free assistant reads the live scene summary (objects, materials, clips) before answering.</div>
@@ -537,7 +545,11 @@ function renderAskTab(session: EditorSession, body: HTMLElement): void {
       (log.lastChild as HTMLElement).textContent = answer;
       log.scrollTop = log.scrollHeight;
     } catch (e) {
-      (log.lastChild as HTMLElement).textContent = `Error: ${(e as Error).message}`;
+      // Cloud AI unreachable → still answer factual scene questions offline.
+      const local = answerLocally(session.doc, q);
+      (log.lastChild as HTMLElement).textContent = local
+        ? `📴 Offline answer (free AI unreachable: ${shortReason(e)}):\n\n${local}`
+        : `Error: ${(e as Error).message}`;
     } finally {
       go.disabled = false;
     }
@@ -842,6 +854,9 @@ function renderSettingsTab(body: HTMLElement): void {
     <label class="field">Hugging Face token (optional, shorter queues on both Spaces — free at huggingface.co)
       <input id="ai-hf" class="input" type="password" placeholder="hf_…" value="${escapeHtml(s.hfToken)}" />
     </label>
+    <label class="field">Pollinations key (optional — makes Ask + textures use your quota via the current API when the anonymous tier is blocked or throttled; free at enter.pollinations.ai/keys)
+      <input id="ai-pollkey" class="input" type="password" placeholder="sk_…" value="${escapeHtml(s.pollinationsKey)}" />
+    </label>
     <div class="row-between" style="margin-top:12px">
       <button class="btn btn-ghost" id="ai-reset">Reset to free defaults</button>
       <button class="btn btn-primary" id="ai-save">Save</button>
@@ -879,6 +894,7 @@ function renderSettingsTab(body: HTMLElement): void {
         spaceUrl: read('ai-space') || prev.meshCustom.spaceUrl,
       },
       hfToken: read('ai-hf'),
+      pollinationsKey: read('ai-pollkey'),
     }));
     await flushAiSettings();
     toast('AI settings saved', 'success');

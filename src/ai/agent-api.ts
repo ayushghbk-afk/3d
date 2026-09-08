@@ -17,6 +17,7 @@ import { uid, nowIso } from '../lib/utils.js';
 import { toAiContext, toProjectJson, toSceneJson } from '../editor/serialization.js';
 import { deleteKeyframeAt, setKeyframe, trackValueOf } from '../editor/animation.js';
 import { analyzeScene, planPaint, planTidy } from './scene-iq.js';
+import { answerLocally } from './local-answer.js';
 import { aiSettings, logActivity, verifyAgentToken } from './settings.js';
 import { generateImageSmart, generateMeshSmart, getChatProvider } from './factory.js';
 import { texturePrompt } from './pollinations.js';
@@ -887,14 +888,21 @@ export class AgentAPI {
     const t = await this.resolve(id);
     const chat = getChatProvider();
     const context = toAiContext(t.doc).slice(0, 6000);
-    const answer = await chat.chat([
-      {
-        role: 'system',
-        content: `You are the Web 3D Studio assistant. Answer briefly about the user's 3D project below. When suggesting edits, name exact Agent API methods (object.add, object.update, material.update, ...).\n\n${context}`,
-      },
-      { role: 'user', content: question },
-    ]);
-    return { mode: t.mode, projectId: t.doc.id, answer };
+    try {
+      const answer = await chat.chat([
+        {
+          role: 'system',
+          content: `You are the Web 3D Studio assistant. Answer briefly about the user's 3D project below. When suggesting edits, name exact Agent API methods (object.add, object.update, material.update, ...).\n\n${context}`,
+        },
+        { role: 'user', content: question },
+      ]);
+      return { mode: t.mode, projectId: t.doc.id, answer };
+    } catch (e) {
+      // Cloud AI unreachable → still answer factual scene questions offline.
+      const local = answerLocally(t.doc, question);
+      if (local) return { mode: t.mode, projectId: t.doc.id, answer: local, offline: true };
+      throw new AgentError('PROVIDER', (e as Error).message || 'Assistant unreachable.');
+    }
   }
 
   // ===================================================================
@@ -1114,7 +1122,7 @@ const METHOD_DOCS: Record<AgentMethod, string> = {
   'history.undo': 'Undo (open editor only).',
   'history.redo': 'Redo (open editor only).',
   'save.now': 'Save now (local + cloud when signed in). Params: {projectId?}.',
-  'ai.ask': 'Ask the assistant about the project. Params: {projectId?, question}.',
+  'ai.ask': 'Ask the assistant about the project. Params: {projectId?, question}. Factual scene questions fall back to an offline answer (offline:true) when the cloud AI is unreachable.',
   'image.generate': 'Text → image data URL (free Flux by default). Params: {prompt, width?, height?, seed?, strict?}.',
   'texture.generate': 'Text → texture applied to a material. Params: {projectId?, prompt, materialId?, size?, seamless?, strict?}.',
   'model.generate': 'Text → GLB imported into the scene (free Stable Fast 3D by default, TripoSR fallback). Params: {projectId?, prompt, name?, quality?, model?, strict?}.',

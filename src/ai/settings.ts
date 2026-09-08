@@ -27,6 +27,9 @@ export interface AiSettings {
   meshCustom: CustomEndpoint & { spaceUrl: string };
   /** Optional: Hugging Face token shortens TripoSR queue waits. Free at hf.co. */
   hfToken: string;
+  /** Optional: Pollinations key (free at enter.pollinations.ai/keys) — uses the
+   * current gen.pollinations.ai API for Ask with higher reliability/limits. */
+  pollinationsKey: string;
   agent: {
     enabled: boolean;
     tokens: AgentTokenMeta[];
@@ -76,6 +79,7 @@ export function defaultSettings(): AiSettings {
       spaceUrl: env('VITE_AI_TRIPOSR_SPACE') || 'https://stabilityai-triposr.hf.space',
     },
     hfToken: env('VITE_HF_TOKEN'),
+    pollinationsKey: env('VITE_POLLINATIONS_KEY'),
     agent: {
       enabled: false,
       tokens: [],
@@ -121,6 +125,7 @@ export function normalizeSettings(raw: unknown): AiSettings {
         : d.sf3dSpaceUrl,
     meshCustom,
     hfToken: typeof s.hfToken === 'string' ? s.hfToken.trim() : '',
+    pollinationsKey: typeof s.pollinationsKey === 'string' ? s.pollinationsKey.trim() : '',
     agent: {
       enabled: s.agent?.enabled === true,
       tokens,

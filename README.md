@@ -79,7 +79,8 @@ Editor → **✨ AI** opens AI Studio:
   any material.
 - **🖌️ Paint** — the AI looks at your groups to identify each model and its
   parts, then auto-paints, AI-textures or tidies the whole scene at once.
-- **💬 Ask** — project-grounded Q&A over the live scene summary.
+- **💬 Ask** — project-grounded Q&A over the live scene summary (counts,
+  lists and summaries keep working offline if the free AI is unreachable).
 - **🤖 Agent API** — let an AI agent list projects and make changes (objects,
   materials, textures, models, keyframes) via in-page JS, `postMessage`,
   `BroadcastChannel`, or real HTTP through `npm run agent-relay`.
