@@ -1,0 +1,380 @@
+-- Web 3D Studio — initial schema (spec §22-24)
+-- Canonical cloud source of truth: projects, scenes, objects, materials, animations, teams, versions.
+
+-- ============ helpers ============
+create or replace function public.is_project_member(p_project_id uuid)
+returns boolean
+language sql
+security definer
+stable
+as $$
+  select exists (
+    select 1 from public.project_members m
+    where m.project_id = p_project_id and m.user_id = auth.uid()
+  ) or exists (
+    select 1 from public.projects p
+    where p.id = p_project_id and p.owner_id = auth.uid()
+  );
+$$;
+
+create or replace function public.project_role(p_project_id uuid)
+returns text
+language sql
+security definer
+stable
+as $$
+  select coalesce((
+    select m.role from public.project_members m
+    where m.project_id = p_project_id and m.user_id = auth.uid()
+    limit 1
+  ), case when exists (
+    select 1 from public.projects p where p.id = p_project_id and p.owner_id = auth.uid()
+  ) then 'owner' else null end);
+$$;
+
+create or replace function public.can_edit_project(p_project_id uuid)
+returns boolean
+language sql
+security definer
+stable
+as $$
+  select coalesce(public.project_role(p_project_id), '') in ('owner','admin','editor','animator');
+$$;
+
+create or replace function public.can_admin_project(p_project_id uuid)
+returns boolean
+language sql
+security definer
+stable
+as $$
+  select coalesce(public.project_role(p_project_id), '') in ('owner','admin');
+$$;
+
+create or replace function public.touch_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+-- ============ profiles ============
+create table public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  email text,
+  display_name text,
+  avatar_url text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table public.profiles enable row level security;
+create policy "profiles self read" on public.profiles for select using (auth.uid() = id);
+-- teammates can see each other's display names
+create policy "profiles team read" on public.profiles for select using (
+  exists (
+    select 1 from public.project_members m1
+    join public.project_members m2 on m2.project_id = m1.project_id
+    where m1.user_id = auth.uid() and m2.user_id = public.profiles.id
+  )
+);
+create policy "profiles self upsert" on public.profiles for insert with check (auth.uid() = id);
+create policy "profiles self update" on public.profiles for update using (auth.uid() = id);
+create trigger profiles_touch before update on public.profiles
+  for each row execute function public.touch_updated_at();
+
+-- ============ projects ============
+create table public.projects (
+  id uuid primary key default gen_random_uuid(),
+  name text not null default 'Untitled',
+  mode text not null default 'solo' check (mode in ('solo','team')),
+  owner_id uuid not null references auth.users(id) on delete cascade,
+  thumbnail_url text,
+  version integer not null default 1,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index projects_owner_idx on public.projects(owner_id);
+create index projects_updated_idx on public.projects(updated_at desc);
+alter table public.projects enable row level security;
+create policy "projects member read" on public.projects for select using (public.is_project_member(id));
+create policy "projects owner create" on public.projects for insert with check (auth.uid() = owner_id);
+create policy "projects edit update" on public.projects for update using (public.can_edit_project(id));
+create policy "projects admin delete" on public.projects for delete using (public.can_admin_project(id));
+create trigger projects_touch before update on public.projects
+  for each row execute function public.touch_updated_at();
+
+-- ============ project_members ============
+create table public.project_members (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  role text not null default 'editor' check (role in ('owner','admin','editor','animator','viewer')),
+  created_at timestamptz not null default now(),
+  unique (project_id, user_id)
+);
+create index members_project_idx on public.project_members(project_id);
+create index members_user_idx on public.project_members(user_id);
+alter table public.project_members enable row level security;
+create policy "members read" on public.project_members for select using (public.is_project_member(project_id));
+create policy "members admin manage" on public.project_members for insert with check (public.can_admin_project(project_id));
+create policy "members admin update" on public.project_members for update using (public.can_admin_project(project_id));
+create policy "members admin delete" on public.project_members for delete using (public.can_admin_project(project_id));
+
+-- ============ scenes ============
+create table public.scenes (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  name text not null default 'Main Scene',
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index scenes_project_idx on public.scenes(project_id);
+alter table public.scenes enable row level security;
+create policy "scenes read" on public.scenes for select using (public.is_project_member(project_id));
+create policy "scenes edit insert" on public.scenes for insert with check (public.can_edit_project(project_id));
+create policy "scenes edit update" on public.scenes for update using (public.can_edit_project(project_id));
+create policy "scenes edit delete" on public.scenes for delete using (public.can_edit_project(project_id));
+create trigger scenes_touch before update on public.scenes
+  for each row execute function public.touch_updated_at();
+
+-- ============ scene_objects ============
+create table public.scene_objects (
+  id uuid primary key default gen_random_uuid(),
+  scene_id uuid not null references public.scenes(id) on delete cascade,
+  project_id uuid not null references public.projects(id) on delete cascade,
+  name text not null default 'Object',
+  object_type text not null default 'cube',
+  parent_id uuid references public.scene_objects(id) on delete set null,
+  position numeric[] not null default '{0,0,0}',
+  rotation numeric[] not null default '{0,0,0}',
+  scale numeric[] not null default '{1,1,1}',
+  visible boolean not null default true,
+  locked boolean not null default false,
+  material_id uuid,
+  geometry jsonb,
+  asset_id uuid,
+  version integer not null default 1,
+  locked_by uuid,
+  locked_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index scene_objects_scene_idx on public.scene_objects(scene_id);
+create index scene_objects_project_idx on public.scene_objects(project_id);
+alter table public.scene_objects enable row level security;
+create policy "objects read" on public.scene_objects for select using (public.is_project_member(project_id));
+create policy "objects edit insert" on public.scene_objects for insert with check (public.can_edit_project(project_id));
+create policy "objects edit update" on public.scene_objects for update using (public.can_edit_project(project_id));
+create policy "objects edit delete" on public.scene_objects for delete using (public.can_edit_project(project_id));
+create trigger scene_objects_touch before update on public.scene_objects
+  for each row execute function public.touch_updated_at();
+
+-- ============ folders ============
+create table public.folders (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  name text not null default 'Folder',
+  parent_id uuid references public.folders(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+create index folders_project_idx on public.folders(project_id);
+alter table public.folders enable row level security;
+create policy "folders read" on public.folders for select using (public.is_project_member(project_id));
+create policy "folders edit" on public.folders for all using (public.can_edit_project(project_id));
+
+-- ============ assets ============
+create table public.assets (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  name text not null,
+  kind text not null default 'other',
+  mime text,
+  size_bytes bigint,
+  storage_path text,
+  folder_id uuid references public.folders(id) on delete set null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index assets_project_idx on public.assets(project_id);
+alter table public.assets enable row level security;
+create policy "assets read" on public.assets for select using (public.is_project_member(project_id));
+create policy "assets edit insert" on public.assets for insert with check (public.can_edit_project(project_id));
+create policy "assets edit delete" on public.assets for delete using (public.can_edit_project(project_id));
+
+-- ============ models ============
+create table public.models (
+  id uuid primary key default gen_random_uuid(),
+  asset_id uuid not null references public.assets(id) on delete cascade,
+  project_id uuid not null references public.projects(id) on delete cascade,
+  format text not null default 'glb',
+  meta jsonb,
+  created_at timestamptz not null default now()
+);
+create index models_project_idx on public.models(project_id);
+alter table public.models enable row level security;
+create policy "models read" on public.models for select using (public.is_project_member(project_id));
+create policy "models edit" on public.models for all using (public.can_edit_project(project_id));
+
+-- ============ materials ============
+create table public.materials (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  scene_id uuid references public.scenes(id) on delete cascade,
+  name text not null default 'Material',
+  base_color text not null default '#8b9bb4',
+  metalness numeric not null default 0.1,
+  roughness numeric not null default 0.7,
+  emissive text not null default '#000000',
+  emissive_intensity numeric not null default 0,
+  opacity numeric not null default 1,
+  transparent boolean not null default false,
+  node_graph jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index materials_project_idx on public.materials(project_id);
+alter table public.materials enable row level security;
+create policy "materials read" on public.materials for select using (public.is_project_member(project_id));
+create policy "materials edit" on public.materials for all using (public.can_edit_project(project_id));
+create trigger materials_touch before update on public.materials
+  for each row execute function public.touch_updated_at();
+
+-- ============ textures ============
+create table public.textures (
+  id uuid primary key default gen_random_uuid(),
+  asset_id uuid not null references public.assets(id) on delete cascade,
+  project_id uuid not null references public.projects(id) on delete cascade,
+  slot text not null default 'baseColor',
+  created_at timestamptz not null default now()
+);
+create index textures_project_idx on public.textures(project_id);
+alter table public.textures enable row level security;
+create policy "textures read" on public.textures for select using (public.is_project_member(project_id));
+create policy "textures edit" on public.textures for all using (public.can_edit_project(project_id));
+
+-- ============ animations ============
+create table public.animations (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  scene_id uuid references public.scenes(id) on delete cascade,
+  name text not null default 'Clip',
+  fps integer not null default 30,
+  length_frames integer not null default 90,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index animations_project_idx on public.animations(project_id);
+alter table public.animations enable row level security;
+create policy "animations read" on public.animations for select using (public.is_project_member(project_id));
+-- animators can edit animation even with limited scene access (§27)
+create policy "animations edit" on public.animations for all using (public.can_edit_project(project_id));
+create trigger animations_touch before update on public.animations
+  for each row execute function public.touch_updated_at();
+
+create table public.animation_tracks (
+  id uuid primary key default gen_random_uuid(),
+  animation_id uuid not null references public.animations(id) on delete cascade,
+  object_id uuid,
+  property text not null default 'position',
+  created_at timestamptz not null default now()
+);
+create index tracks_animation_idx on public.animation_tracks(animation_id);
+alter table public.animation_tracks enable row level security;
+create policy "tracks read" on public.animation_tracks for select using (
+  exists (select 1 from public.animations a where a.id = animation_id and public.is_project_member(a.project_id))
+);
+create policy "tracks edit" on public.animation_tracks for all using (
+  exists (select 1 from public.animations a where a.id = animation_id and public.can_edit_project(a.project_id))
+);
+
+create table public.keyframes (
+  id uuid primary key default gen_random_uuid(),
+  track_id uuid not null references public.animation_tracks(id) on delete cascade,
+  frame integer not null default 0,
+  value numeric[] not null default '{0,0,0}',
+  interp text not null default 'linear',
+  created_at timestamptz not null default now()
+);
+create index keyframes_track_idx on public.keyframes(track_id);
+alter table public.keyframes enable row level security;
+create policy "keyframes read" on public.keyframes for select using (
+  exists (
+    select 1 from public.animation_tracks t
+    join public.animations a on a.id = t.animation_id
+    where t.id = track_id and public.is_project_member(a.project_id)
+  )
+);
+create policy "keyframes edit" on public.keyframes for all using (
+  exists (
+    select 1 from public.animation_tracks t
+    join public.animations a on a.id = t.animation_id
+    where t.id = track_id and public.can_edit_project(a.project_id)
+  )
+);
+
+-- ============ versions & changes ============
+create table public.project_versions (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  version integer not null,
+  label text,
+  snapshot jsonb not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index versions_project_idx on public.project_versions(project_id, version desc);
+alter table public.project_versions enable row level security;
+create policy "versions read" on public.project_versions for select using (public.is_project_member(project_id));
+create policy "versions create" on public.project_versions for insert with check (public.can_edit_project(project_id));
+
+create table public.project_changes (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  user_id uuid references auth.users(id) on delete set null,
+  kind text not null default 'edit',
+  summary text,
+  payload jsonb,
+  created_at timestamptz not null default now()
+);
+create index changes_project_idx on public.project_changes(project_id, created_at desc);
+alter table public.project_changes enable row level security;
+create policy "changes read" on public.project_changes for select using (public.is_project_member(project_id));
+create policy "changes create" on public.project_changes for insert with check (public.can_edit_project(project_id));
+
+-- ============ storage ============
+insert into storage.buckets (id, name, public) values ('assets', 'assets', false)
+  on conflict (id) do nothing;
+insert into storage.buckets (id, name, public) values ('thumbnails', 'thumbnails', true)
+  on conflict (id) do nothing;
+
+-- Storage paths are namespaced: <project_id>/...
+create policy "assets read" on storage.objects for select using (
+  bucket_id = 'assets' and public.is_project_member((storage.foldername(name))[1]::uuid)
+);
+create policy "assets write" on storage.objects for insert with check (
+  bucket_id = 'assets' and public.can_edit_project((storage.foldername(name))[1]::uuid)
+);
+create policy "assets delete" on storage.objects for delete using (
+  bucket_id = 'assets' and public.can_edit_project((storage.foldername(name))[1]::uuid)
+);
+create policy "thumbs public read" on storage.objects for select using (bucket_id = 'thumbnails');
+create policy "thumbs write" on storage.objects for insert with check (
+  bucket_id = 'thumbnails' and public.can_edit_project((storage.foldername(name))[1]::uuid)
+);
+
+-- ============ realtime (durable op stream; ephemeral sync uses Broadcast/Presence) ============
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and tablename = 'scene_objects'
+  ) then
+    alter publication supabase_realtime add table public.scene_objects;
+  end if;
+exception when others then
+  -- publication management may be restricted; broadcast path still works
+  null;
+end $$;

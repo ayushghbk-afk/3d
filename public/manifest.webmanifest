@@ -1,0 +1,14 @@
+{
+  "name": "Web 3D Studio",
+  "short_name": "3D Studio",
+  "description": "Lightweight browser-based 3D modeling, animation and collaboration",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14",
+  "icons": [
+    { "src": "./icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
