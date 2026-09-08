@@ -10,8 +10,9 @@ The app is a static page (GitHub Pages, no server), so the API runs
 (headless mode); with a project open, they drive the live editor with
 undo/redo, viewport updates and realtime sync.
 
-- **Free 3D generator:** TripoSR (Stability AI × Tripo AI, open source) via
-  the public Hugging Face Space — text → image → GLB → scene. No signup, no key.
+- **Free 3D generator:** Stable Fast 3D (Stability AI, game-ready meshes with
+  UVs + textures) via the public Hugging Face Space — text → image → GLB →
+  scene. No signup, no key. TripoSR is the automatic fallback if SF3D is busy.
 - **Free texture generator:** Pollinations Flux — text → texture → material map.
   No signup, no key (~1 image / 15s on the anonymous tier).
 - **Free assistant:** Pollinations text (OpenAI-compatible) for the Ask tab and
@@ -184,7 +185,7 @@ Omit `projectId` to target the open project (live), or pass one from
 | `ai.ask` | generate | `{projectId?, question}` → grounded answer |
 | `image.generate` | generate | `{prompt, width?, height?, seed?, strict?}` → `{dataUrl, …}` |
 | `texture.generate` | generate | `{projectId?, prompt, materialId?, size?, seamless?, strict?}` → applied to material (new one if omitted) |
-| `model.generate` | generate | `{projectId?, prompt, name?, quality?, strict?}` → GLB imported; `quality`: fast/balanced/high |
+| `model.generate` | generate | `{projectId?, prompt, name?, quality?, model?, strict?}` → GLB imported; `quality`: fast/balanced/high; `model`: `sf3d` (best, default) or `triposr` (faster) |
 
 Generation responses include `provider` and, when a fallback fired,
 `fallback: {from, to, reason}`. Pass `strict: true` to disable fallbacks and
@@ -217,9 +218,11 @@ Every custom block has a **Test** button. Defaults can also be pre-seeded per
 deployment with `VITE_AI_*` vars (see `.env.example`) — the UI can still
 override them per browser.
 
-TripoSR tuning: override the Space URL (e.g. your own GPU Space running the
-TripoSR demo) and optionally add a Hugging Face token (free at
-huggingface.co) for shorter queue waits.
+3D tuning: override either Space URL (e.g. your own GPU Space running the SF3D
+or TripoSR demo) and optionally add a Hugging Face token (free at
+huggingface.co) for shorter queue waits on both. Generation tries your
+selected model first, then the other free model, then the offline mockup —
+unless `strict` is set.
 
 ## 6. Security notes
 

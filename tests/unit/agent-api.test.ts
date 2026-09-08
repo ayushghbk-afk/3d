@@ -249,7 +249,7 @@ describe('generation (mocked network)', () => {
     };
     expect(out.procedural).toBe(true);
     expect(out.objectIds.length).toBeGreaterThanOrEqual(5);
-    expect(out.fallback.from).toContain('TripoSR');
+    expect(out.fallback.from).toContain('Stable Fast 3D');
   });
 
   it('model.generate strict surfaces the provider error', async () => {
@@ -259,16 +259,75 @@ describe('generation (mocked network)', () => {
     await expect(call('model.generate', { projectId, prompt: 'chair', strict: true })).rejects.toThrow(/offline|Reference image failed/);
   });
 
-  it('model.generate imports a TripoSR GLB end to end', async () => {
+  it('model.generate imports an SF3D GLB end to end', async () => {
     const glb = new Uint8Array(2048);
     glb.set([0x67, 0x6c, 0x54, 0x46]);
-    const sse =
-      'event: process_generating\ndata: {}\n\n' +
-      'event: process_completed\ndata: {"output":{"data":[null,{"url":"/gradio_api/file=/tmp/x/model.obj","orig_name":"model.obj"},{"url":"/gradio_api/file=/tmp/x/model.glb","orig_name":"model.glb"}]}}\n\n';
+    const completed = (data: unknown) =>
+      `event: process_completed\ndata: ${JSON.stringify({ output: { data }, success: true })}\n\n`;
+    // requires → "Remove Background" → bg removal → generate (same session).
+    const streams = [
+      completed([{ value: 'Remove Background', visible: true }, null, null, null, { visible: false }, { visible: false }]),
+      completed([{ value: 'Run' }, { path: '/tmp/s1.png' }, { path: '/tmp/s2.png' }, null, { visible: false }, { visible: false }]),
+      completed([{}, {}, {}, {}, { value: { url: '/gradio_api/file=/tmp/x/model.glb', orig_name: 'model.glb' }, visible: true }, {}]),
+    ];
+    let streamCalls = 0;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: unknown) => {
         const url = String(input);
+        if (url.includes('image.pollinations.ai')) return imageResponse();
+        if (url.endsWith('/config.json')) {
+          return Response.json({
+            components: [
+              { id: 1, type: 'image' },
+              { id: 3, type: 'slider', props: { label: 'Foreground Ratio', value: 0.85 } },
+              { id: 4, type: 'radio', props: { value: 'None' } },
+              { id: 7, type: 'button', props: { value: 'Run' } },
+              { id: 8, type: 'state' },
+              { id: 9, type: 'state' },
+              { id: 10, type: 'litmodel3d' },
+              { id: 11, type: 'column' },
+            ],
+            dependencies: [
+              { id: 20, inputs: [1, 3], outputs: [7, 8, 9, 10, 11] },
+              { id: 21, inputs: [7, 1, 9, 3, 4, 3, 3], outputs: [7, 8, 9, 10, 11] },
+            ],
+          });
+        }
+        if (url.endsWith('/gradio_api/upload')) return Response.json(['/tmp/x/input.png']);
+        if (url.endsWith('/gradio_api/queue/join')) return Response.json({ event_id: 'e1' });
+        if (url.includes('/gradio_api/queue/data')) {
+          const sse = streams[Math.min(streamCalls++, streams.length - 1)];
+          return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+        }
+        if (url.includes('model.glb')) {
+          return new Response(glb as unknown as BodyInit, { status: 200, headers: { 'content-type': 'model/gltf-binary' } });
+        }
+        throw new Error(`unexpected url ${url}`);
+      }),
+    );
+    const out = (await call('model.generate', { projectId, prompt: 'toy car', quality: 'fast' })) as {
+      object: { type: string; assetId: string | null }; provider: string; fallback: null;
+    };
+    expect(out.provider).toBe('sf3d');
+    expect(out.fallback).toBeNull();
+    expect(out.object.type).toBe('imported');
+    expect(out.object.assetId).not.toBeNull();
+    expect(streamCalls).toBe(3); // check → bg removal → generate
+  });
+
+  it('model.generate falls back to TripoSR when SF3D is down', async () => {
+    const glb = new Uint8Array(2048);
+    glb.set([0x67, 0x6c, 0x54, 0x46]);
+    const sse =
+      'event: process_completed\ndata: {"success":true,"output":{"data":[null,{"url":"/gradio_api/file=/tmp/x/model.glb","orig_name":"model.glb"}]}}\n\n';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        // SF3D answers but with a broken UI (fails discovery fast, no wake-up wait).
+        if (url.includes('stable-fast-3d') && url.endsWith('/config.json')) return Response.json({});
+        if (url.includes('stable-fast-3d')) throw new Error('sf3d broken');
         if (url.includes('image.pollinations.ai')) return imageResponse();
         if (url.endsWith('/config.json')) {
           return Response.json({
@@ -291,12 +350,13 @@ describe('generation (mocked network)', () => {
         throw new Error(`unexpected url ${url}`);
       }),
     );
-    const out = (await call('model.generate', { projectId, prompt: 'toy car', quality: 'fast' })) as {
-      object: { type: string; assetId: string | null }; provider: string;
+    const out = (await call('model.generate', { projectId, prompt: 'toy car' })) as {
+      object: { type: string }; provider: string; fallback: { from: string; to: string };
     };
     expect(out.provider).toBe('triposr');
     expect(out.object.type).toBe('imported');
-    expect(out.object.assetId).not.toBeNull();
+    expect(out.fallback.from).toContain('Stable Fast 3D');
+    expect(out.fallback.to).toContain('TripoSR');
   });
 
   it('ai.ask answers with project context', async () => {

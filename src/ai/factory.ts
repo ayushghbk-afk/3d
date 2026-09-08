@@ -7,7 +7,10 @@ import type { ChatProvider, ImageProvider, MeshProvider } from './providers.js';
 import { PollinationsChatProvider, PollinationsImageProvider } from './pollinations.js';
 import { CustomChatProvider, CustomImageProvider, CustomMeshProvider } from './custom.js';
 import { TripoSRMeshProvider } from './triposr.js';
+import { Sf3dMeshProvider } from './sf3d.js';
 import { ProceduralImageProvider, planProcedural, type ProcPart } from './procedural.js';
+
+export type FreeMeshModel = 'sf3d' | 'triposr';
 
 export function getChatProvider(s: AiSettings = aiSettings.get()): ChatProvider {
   if (s.assistantProvider === 'custom' && s.assistantCustom.baseUrl) {
@@ -23,15 +26,37 @@ export function getImageProvider(s: AiSettings = aiSettings.get()): ImageProvide
   return new PollinationsImageProvider();
 }
 
-export function getMeshProvider(s: AiSettings = aiSettings.get(), images?: ImageProvider): MeshProvider {
-  if (s.meshProvider === 'custom' && s.meshCustom.baseUrl) {
+function freeMeshProvider(model: FreeMeshModel, s: AiSettings, images: ImageProvider): MeshProvider {
+  return model === 'triposr'
+    ? new TripoSRMeshProvider({ spaceUrl: s.meshCustom.spaceUrl, hfToken: s.hfToken, imageProvider: images })
+    : new Sf3dMeshProvider({ spaceUrl: s.sf3dSpaceUrl, hfToken: s.hfToken, imageProvider: images });
+}
+
+export function getMeshProvider(
+  s: AiSettings = aiSettings.get(),
+  images?: ImageProvider,
+  modelOverride?: FreeMeshModel,
+): MeshProvider {
+  const imgs = images ?? getImageProvider(s);
+  if (!modelOverride && s.meshProvider === 'custom' && s.meshCustom.baseUrl) {
     return new CustomMeshProvider(s.meshCustom);
   }
-  return new TripoSRMeshProvider({
-    spaceUrl: s.meshCustom.spaceUrl,
-    hfToken: s.hfToken,
-    imageProvider: images ?? getImageProvider(s),
-  });
+  const model = modelOverride ?? (s.meshProvider === 'custom' ? 'sf3d' : s.meshProvider);
+  return freeMeshProvider(model, s, imgs);
+}
+
+/** Ordered 3D chain: configured provider → the other free model. */
+export function meshProviderChain(
+  s: AiSettings = aiSettings.get(),
+  modelOverride?: FreeMeshModel,
+): MeshProvider[] {
+  const images = getImageProvider(s);
+  if (!modelOverride && s.meshProvider === 'custom' && s.meshCustom.baseUrl) {
+    return [new CustomMeshProvider(s.meshCustom), freeMeshProvider('sf3d', s, images), freeMeshProvider('triposr', s, images)];
+  }
+  const first = modelOverride ?? (s.meshProvider === 'custom' ? 'sf3d' : s.meshProvider);
+  const second: FreeMeshModel = first === 'sf3d' ? 'triposr' : 'sf3d';
+  return [freeMeshProvider(first, s, images), freeMeshProvider(second, s, images)];
 }
 
 export interface FallbackInfo {
@@ -75,29 +100,42 @@ export type SmartMeshOutcome =
   | { kind: 'glb'; result: import('./types.js').MeshGenResult; fallback: FallbackInfo | null }
   | { kind: 'plan'; parts: ProcPart[]; template: string; prompt: string; fallback: FallbackInfo | null };
 
-/** Configured 3D provider → offline primitive plan (unless strict). */
+/** 3D chain: configured model → other free model → offline plan (unless strict). */
 export async function generateMeshSmart(
   prompt: string,
-  opts: MeshGenOptions & { strict?: boolean } = {},
+  opts: MeshGenOptions & { strict?: boolean; model?: FreeMeshModel } = {},
   s: AiSettings = aiSettings.get(),
 ): Promise<SmartMeshOutcome> {
-  const primary = getMeshProvider(s);
-  try {
-    const result = await primary.textTo3D(prompt, opts);
-    return { kind: 'glb', result, fallback: null };
-  } catch (e) {
-    if (opts.strict) throw e;
-    const { template, parts } = planProcedural(prompt);
-    return {
-      kind: 'plan',
-      parts,
-      template,
-      prompt,
-      fallback: {
-        from: primary.label,
-        to: 'Offline primitives (no AI)',
-        reason: (e as Error).message,
-      },
-    };
+  const chain = meshProviderChain(s, opts.model);
+  const primary = chain[0];
+  let firstError: Error | null = null;
+  const attempts = opts.strict ? chain.slice(0, 1) : chain;
+  for (const provider of attempts) {
+    try {
+      const result = await provider.textTo3D(prompt, opts);
+      return {
+        kind: 'glb',
+        result,
+        fallback: provider === primary
+          ? null
+          : { from: primary.label, to: provider.label, reason: (firstError as Error).message },
+      };
+    } catch (e) {
+      if (!firstError) firstError = e as Error;
+      if (opts.strict) throw e;
+    }
   }
+  if (opts.strict) throw firstError ?? new Error('3D generation failed.');
+  const { template, parts } = planProcedural(prompt);
+  return {
+    kind: 'plan',
+    parts,
+    template,
+    prompt,
+    fallback: {
+      from: primary.label,
+      to: 'Offline primitives (no AI)',
+      reason: (firstError as Error).message,
+    },
+  };
 }

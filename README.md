@@ -73,8 +73,8 @@ removes that restriction.
 
 Editor → **✨ AI** opens AI Studio:
 
-- **🧊 3D Model** — free text-to-3D (TripoSR via Hugging Face, no key), with an
-  offline primitive mockup when AI is unreachable.
+- **🧊 3D Model** — free text-to-3D (Stable Fast 3D via Hugging Face, no key;
+  TripoSR fallback), with an offline primitive mockup when AI is unreachable.
 - **🎨 Texture** — free text-to-texture (Pollinations Flux, no key) applied to
   any material.
 - **💬 Ask** — project-grounded Q&A over the live scene summary.

@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { buildPollinationsImageUrl, texturePrompt } from '../../src/ai/pollinations.js';
 import { parseSseChunk } from '../../src/ai/providers.js';
 import { buildSpaceArgs, findGenerateFnIndex, isGlb, makeFileData, parseUploadPaths } from '../../src/ai/triposr.js';
+import { findSf3dDeps, parseRunButtonValue } from '../../src/ai/sf3d.js';
+import { scanOutputsForFile } from '../../src/ai/gradio.js';
 import { planProcedural } from '../../src/ai/procedural.js';
 import { defaultSettings, normalizeSettings } from '../../src/ai/settings.js';
 
@@ -101,6 +103,55 @@ describe('triposr config discovery', () => {
   });
 });
 
+describe('sf3d flow discovery', () => {
+  const config = {
+    components: [
+      { id: 1, type: 'image' },
+      { id: 3, type: 'slider', props: { label: 'Foreground Ratio', value: 0.85 } },
+      { id: 4, type: 'radio', props: { value: 'None' } },
+      { id: 7, type: 'button', props: { value: 'Run' } },
+      { id: 8, type: 'state' },
+      { id: 9, type: 'state' },
+      { id: 10, type: 'litmodel3d' },
+      { id: 11, type: 'column' },
+    ],
+    dependencies: [
+      { id: 20, inputs: [1, 3], outputs: [7, 8, 9, 10, 11] },
+      { id: 21, inputs: [7, 1, 9, 3, 4, 3, 3], outputs: [7, 8, 9, 10, 11] },
+      { id: 22, inputs: [8, 3], outputs: [9] }, // foreground slider change — not the flow
+    ],
+  };
+
+  it('finds the background-check and run actions', () => {
+    expect(findSf3dDeps(config)).toEqual({ requiresFn: 20, runFn: 21 });
+  });
+
+  it('throws when the flow is missing', () => {
+    expect(() => findSf3dDeps({ components: [], dependencies: [] })).toThrow(/changed its UI/);
+  });
+});
+
+describe('sf3d button parsing', () => {
+  it('reads raw and gr.update shapes, defaulting to background removal', () => {
+    expect(parseRunButtonValue('Run')).toBe('Run');
+    expect(parseRunButtonValue({ value: 'Run', visible: true })).toBe('Run');
+    expect(parseRunButtonValue({ value: 'Remove Background' })).toBe('Remove Background');
+    expect(parseRunButtonValue(null)).toBe('Remove Background');
+    expect(parseRunButtonValue({ unexpected: 1 })).toBe('Remove Background');
+  });
+});
+
+describe('gradio output scanning', () => {
+  it('finds nested model files, preferring the wanted extension', () => {
+    const outputs = [
+      { value: 'Run' },
+      { value: { url: '/gradio_api/file=/tmp/x/model.glb', orig_name: 'model.glb' } },
+    ];
+    expect(scanOutputsForFile(outputs, '.glb')?.orig_name).toBe('model.glb');
+    expect(scanOutputsForFile([{ value: 'Run' }], '.glb')).toBeNull();
+  });
+});
+
 describe('GLB magic check', () => {
   it('accepts glTF binaries and rejects the rest', () => {
     const glb = new Uint8Array([0x67, 0x6c, 0x54, 0x46, 1, 0, 0, 0, 0, 0, 0, 0]).buffer as ArrayBuffer;
@@ -133,7 +184,7 @@ describe('AI settings', () => {
     const d = defaultSettings();
     expect(d.assistantProvider).toBe('pollinations');
     expect(d.imageProvider).toBe('pollinations');
-    expect(d.meshProvider).toBe('triposr');
+    expect(d.meshProvider).toBe('sf3d');
     expect(d.agent.enabled).toBe(false);
     expect(d.agent.tokens).toEqual([]);
   });

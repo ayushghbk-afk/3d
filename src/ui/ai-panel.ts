@@ -51,7 +51,11 @@ function renderTabs(session: EditorSession, root: HTMLElement, active: AiTab): v
 
 function providerBadge(): string {
   const s = aiSettings.get();
-  const mesh = s.meshProvider === 'custom' ? 'Custom 3D API' : 'TripoSR (free, no key)';
+  const mesh = s.meshProvider === 'custom'
+    ? 'Custom 3D API'
+    : s.meshProvider === 'triposr'
+      ? 'TripoSR (free, no key)'
+      : 'Stable Fast 3D (free, no key)';
   const img = s.imageProvider === 'custom' ? 'Custom image API' : 'Pollinations Flux (free, no key)';
   return `<p class="small muted">3D: <b>${escapeHtml(mesh)}</b> · Textures: <b>${escapeHtml(img)}</b> · <a href="#" id="ai-goto-setup">change</a></p>`;
 }
@@ -73,13 +77,19 @@ function wireSetupLink(scope: HTMLElement, session: EditorSession, root: HTMLEle
 function renderModelTab(session: EditorSession, body: HTMLElement): void {
   const s = aiSettings.get();
   body.innerHTML = `
-    <div class="banner banner-info">Free text-to-3D: your prompt → reference image → <b>TripoSR</b> (Stability AI, open source) → GLB imported into the scene. First run of the day can take 1–3 min while the free service wakes up. Offline? It builds a primitive mockup instead.</div>
+    <div class="banner banner-info">Free text-to-3D: your prompt → reference image → <b>Stable Fast 3D</b> (Stability AI, game-ready meshes) → GLB imported into the scene. First run of the day can take 1–3 min while the free service wakes up. If a model is down it tries the next one automatically.</div>
     ${providerBadge()}
     <label class="field">Describe the model
       <textarea id="ai3d-prompt" class="input" rows="2" placeholder="e.g. a cute low-poly robot toy"></textarea>
     </label>
     <div class="row-between">
       <label class="field" style="flex:1">Name <input id="ai3d-name" class="input" placeholder="auto from prompt" /></label>
+      <label class="field">Model
+        <select id="ai3d-model" class="input">
+          <option value="sf3d" ${s.meshProvider === 'sf3d' ? 'selected' : ''}>Stable Fast 3D (best)</option>
+          <option value="triposr" ${s.meshProvider === 'triposr' ? 'selected' : ''}>TripoSR (faster)</option>
+        </select>
+      </label>
       <label class="field">Quality
         <select id="ai3d-quality" class="input">
           <option value="fast">Fast</option>
@@ -105,6 +115,11 @@ function renderModelTab(session: EditorSession, body: HTMLElement): void {
   const promptEl = body.querySelector('#ai3d-prompt') as HTMLTextAreaElement;
   const nameEl = body.querySelector('#ai3d-name') as HTMLInputElement;
   const qualityEl = body.querySelector('#ai3d-quality') as HTMLSelectElement;
+  const modelEl = body.querySelector('#ai3d-model') as HTMLSelectElement;
+  modelEl.onchange = () => {
+    updateAiSettings((prev) => ({ ...prev, meshProvider: modelEl.value as 'sf3d' | 'triposr' }));
+    toast(`3D model: ${modelEl.selectedOptions[0].textContent}`, 'success');
+  };
   const goBtn = body.querySelector('#ai3d-go') as HTMLButtonElement;
   const cancelBtn = body.querySelector('#ai3d-cancel') as HTMLButtonElement;
   const progressEl = body.querySelector('#ai3d-progress') as HTMLElement;
@@ -134,6 +149,7 @@ function renderModelTab(session: EditorSession, body: HTMLElement): void {
         prompt,
         {
           quality: qualityEl.value as 'fast' | 'balanced' | 'high',
+          model: modelEl.value as 'sf3d' | 'triposr',
           signal: ctrl.signal,
           onProgress: setProgress,
         },
@@ -610,7 +626,8 @@ function renderSettingsTab(body: HTMLElement): void {
     ${customBlock('ai-image', '🎨 Textures & images', 'Pollinations Flux free', s.imageProvider, 'pollinations', s.imageCustom, 'https://api.openai.com/v1', 'dall-e-3', 'POST {base}/images/generations')}
     <div class="panel-sub">🧊 3D models</div>
     <div class="radio-row">
-      <label><input type="radio" name="ai-mesh-prov" value="triposr" ${s.meshProvider === 'triposr' ? 'checked' : ''} /> TripoSR free</label>
+      <label><input type="radio" name="ai-mesh-prov" value="sf3d" ${s.meshProvider === 'sf3d' ? 'checked' : ''} /> Stable Fast 3D (best, free)</label>
+      <label><input type="radio" name="ai-mesh-prov" value="triposr" ${s.meshProvider === 'triposr' ? 'checked' : ''} /> TripoSR (faster, free)</label>
       <label><input type="radio" name="ai-mesh-prov" value="custom" ${s.meshProvider === 'custom' ? 'checked' : ''} /> Custom API</label>
     </div>
     <div id="ai-mesh-custom" ${s.meshProvider === 'custom' ? '' : 'hidden'}>
@@ -625,9 +642,10 @@ function renderSettingsTab(body: HTMLElement): void {
       </div>
       <p class="small" id="ai-mesh-test-out"></p>
     </div>
-    <div class="panel-sub">TripoSR options</div>
-    <label class="field">Space URL <input id="ai-space" class="input" value="${escapeHtml(s.meshCustom.spaceUrl)}" /></label>
-    <label class="field">Hugging Face token (optional, shorter queues — free at huggingface.co)
+    <div class="panel-sub">Free 3D Spaces (override with your own GPU Space if you like)</div>
+    <label class="field">Stable Fast 3D Space URL <input id="ai-sf3d-space" class="input" value="${escapeHtml(s.sf3dSpaceUrl)}" /></label>
+    <label class="field">TripoSR Space URL (automatic fallback) <input id="ai-space" class="input" value="${escapeHtml(s.meshCustom.spaceUrl)}" /></label>
+    <label class="field">Hugging Face token (optional, shorter queues on both Spaces — free at huggingface.co)
       <input id="ai-hf" class="input" type="password" placeholder="hf_…" value="${escapeHtml(s.hfToken)}" />
     </label>
     <div class="row-between" style="margin-top:12px">
@@ -647,9 +665,10 @@ function renderSettingsTab(body: HTMLElement): void {
 
   const read = (id: string): string => (body.querySelector(`#${id}`) as HTMLInputElement).value.trim();
   const save = async (): Promise<void> => {
-    const picked = (name: string, free: string): 'pollinations' | 'custom' | 'triposr' => {
+    const picked = (name: string, free: string): 'pollinations' | 'custom' | 'triposr' | 'sf3d' => {
       const v = (body.querySelector(`input[name="${name}"]:checked`) as HTMLInputElement)?.value;
-      return (v === 'custom' ? 'custom' : free) as 'pollinations' | 'custom' | 'triposr';
+      if (name === 'ai-mesh-prov') return (v === 'custom' || v === 'triposr' ? v : 'sf3d') as 'sf3d' | 'triposr' | 'custom';
+      return (v === 'custom' ? 'custom' : free) as 'pollinations' | 'custom' | 'triposr' | 'sf3d';
     };
     updateAiSettings((prev) => ({
       ...prev,
@@ -657,7 +676,8 @@ function renderSettingsTab(body: HTMLElement): void {
       assistantCustom: { baseUrl: read('ai-assistant-url'), apiKey: read('ai-assistant-key'), model: read('ai-assistant-model') || 'default' },
       imageProvider: picked('ai-image-prov', 'pollinations') as 'pollinations' | 'custom',
       imageCustom: { baseUrl: read('ai-image-url'), apiKey: read('ai-image-key'), model: read('ai-image-model') || 'default' },
-      meshProvider: picked('ai-mesh-prov', 'triposr') as 'triposr' | 'custom',
+      meshProvider: picked('ai-mesh-prov', 'sf3d') as 'sf3d' | 'triposr' | 'custom',
+      sf3dSpaceUrl: read('ai-sf3d-space') || prev.sf3dSpaceUrl,
       meshCustom: {
         baseUrl: read('ai-mesh-url'),
         apiKey: read('ai-mesh-key'),
@@ -680,6 +700,7 @@ function renderSettingsTab(body: HTMLElement): void {
       imageProvider: d.imageProvider,
       imageCustom: d.imageCustom,
       meshProvider: d.meshProvider,
+      sf3dSpaceUrl: d.sf3dSpaceUrl,
       meshCustom: d.meshCustom,
       hfToken: d.hfToken,
     }));

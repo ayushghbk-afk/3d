@@ -831,7 +831,11 @@ export class AgentAPI {
     const name = optStr(p, 'name', 80) ?? prompt.slice(0, 40) ?? 'AI model';
     const quality = (optStr(p, 'quality', 20) ?? 'balanced') as 'fast' | 'balanced' | 'high';
     if (!['fast', 'balanced', 'high'].includes(quality)) throw new AgentError('VALIDATION', 'quality must be fast, balanced or high.');
-    const outcome = await generateMeshSmart(prompt, { quality, strict: bool(p, 'strict') });
+    const model = optStr(p, 'model', 20) as 'sf3d' | 'triposr' | undefined;
+    if (model !== undefined && model !== 'sf3d' && model !== 'triposr') {
+      throw new AgentError('VALIDATION', 'model must be "sf3d" (best) or "triposr" (fast).');
+    }
+    const outcome = await generateMeshSmart(prompt, { quality, strict: bool(p, 'strict'), model });
     if (outcome.kind === 'glb') {
       if (t.mode === 'live' && t.session) {
         const obj = await t.session.importGlbBytes(name, outcome.result.glb.slice(0), `${name}.glb`);
@@ -960,5 +964,5 @@ const METHOD_DOCS: Record<AgentMethod, string> = {
   'ai.ask': 'Ask the assistant about the project. Params: {projectId?, question}.',
   'image.generate': 'Text → image data URL (free Flux by default). Params: {prompt, width?, height?, seed?, strict?}.',
   'texture.generate': 'Text → texture applied to a material. Params: {projectId?, prompt, materialId?, size?, seamless?, strict?}.',
-  'model.generate': 'Text → GLB imported into the scene (free TripoSR by default). Params: {projectId?, prompt, name?, quality?, strict?}.',
+  'model.generate': 'Text → GLB imported into the scene (free Stable Fast 3D by default, TripoSR fallback). Params: {projectId?, prompt, name?, quality?, model?, strict?}.',
 };

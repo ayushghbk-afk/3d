@@ -20,8 +20,10 @@ export interface AiSettings {
   /** Free default: Pollinations Flux image endpoint (no key). */
   imageProvider: 'pollinations' | 'custom';
   imageCustom: CustomEndpoint;
-  /** Free default: TripoSR via Hugging Face Space (no key) + offline fallback. */
-  meshProvider: 'triposr' | 'custom';
+  /** Free default: Stable Fast 3D via Hugging Face Space (no key). */
+  meshProvider: 'sf3d' | 'triposr' | 'custom';
+  /** Override for the SF3D Space (e.g. your own GPU Space). */
+  sf3dSpaceUrl: string;
   meshCustom: CustomEndpoint & { spaceUrl: string };
   /** Optional: Hugging Face token shortens TripoSR queue waits. Free at hf.co. */
   hfToken: string;
@@ -65,7 +67,8 @@ export function defaultSettings(): AiSettings {
       apiKey: env('VITE_AI_IMAGE_KEY'),
       model: env('VITE_AI_IMAGE_MODEL') || 'dall-e-3',
     },
-    meshProvider: 'triposr',
+    meshProvider: 'sf3d',
+    sf3dSpaceUrl: env('VITE_AI_SF3D_SPACE') || 'https://stabilityai-stable-fast-3d.hf.space',
     meshCustom: {
       baseUrl: env('VITE_AI_3D_URL'),
       apiKey: env('VITE_AI_3D_KEY'),
@@ -111,7 +114,11 @@ export function normalizeSettings(raw: unknown): AiSettings {
     assistantCustom: custom(s.assistantCustom, d.assistantCustom),
     imageProvider: s.imageProvider === 'custom' ? 'custom' : 'pollinations',
     imageCustom: custom(s.imageCustom, d.imageCustom),
-    meshProvider: s.meshProvider === 'custom' ? 'custom' : 'triposr',
+    meshProvider: s.meshProvider === 'custom' ? 'custom' : s.meshProvider === 'triposr' ? 'triposr' : 'sf3d',
+    sf3dSpaceUrl:
+      typeof s.sf3dSpaceUrl === 'string' && s.sf3dSpaceUrl.trim()
+        ? s.sf3dSpaceUrl.trim().replace(/\/+$/, '')
+        : d.sf3dSpaceUrl,
     meshCustom,
     hfToken: typeof s.hfToken === 'string' ? s.hfToken.trim() : '',
     agent: {
