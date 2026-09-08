@@ -122,3 +122,61 @@ Browser tests cover nested-path assets, editor refresh/offline reopening, email-
 Live Supabase requests could not be verified from the editing sandbox (outbound TLS connections to Supabase failed). This is **not** evidence that your key is invalid. The live checks above still need to be completed after the dashboard setup.
 
 `supabase/setup.sql` is generated from the migrations. After editing migrations, run `npm run supabase:setup`; the tests reject a stale setup file.
+
+## Scene/project integrity upgrade (20260908000004)
+
+On existing installations apply only missing migrations, in filename order,
+including `20260908000004_scene_project_integrity.sql`. **Do not run setup.sql
+or the initial migration again.** Back up first and use a maintenance window:
+creating the composite index and validating existing data can take locks.
+
+The upgrade rejects new mismatched scene/project references in scene_objects,
+materials and animations. It does not delete or reassign legacy rows. If it emits
+a legacy-data warning, those historical inconsistencies remain until reviewed.
+Find them in the SQL editor (repeat for materials and animations):
+
+```sql
+select o.id, o.scene_id, o.project_id, s.project_id as scene_project_id
+from public.scene_objects o
+left join public.scenes s on s.id = o.scene_id
+where o.scene_id is not null
+  and (s.id is null or o.project_id is distinct from s.project_id);
+```
+
+Review each row's intended ownership with the affected project owners; do not
+blindly change project IDs or delete rows. After a reviewed repair:
+
+```sql
+alter table public.scene_objects validate constraint scene_objects_scene_project_fkey;
+alter table public.materials validate constraint materials_scene_project_fkey;
+alter table public.animations validate constraint animations_scene_project_fkey;
+
+select conname, convalidated from pg_constraint
+where conname in ('scene_objects_scene_project_fkey',
+                  'materials_scene_project_fkey', 'animations_scene_project_fkey');
+```
+
+All three must report `convalidated = true` before declaring legacy integrity
+clean. New writes are checked even while a constraint is NOT VALID. Parent,
+asset, material and animation-object references require a further integrity pass.
+
+### Verify the deployed invite contract, not argument-order guesses
+
+Run with database-admin access, not the public browser key:
+
+```sql
+select n.nspname, p.proname,
+       pg_get_function_identity_arguments(p.oid) as arguments,
+       pg_get_function_result(p.oid) as result
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname = 'join_project';
+
+notify pgrst, 'reload schema';
+```
+
+The frontend expects the names `p_project_id uuid, p_code text`, returning void.
+Resolve unexpected overloads deliberately; do not reverse frontend arguments.
+Test a valid invite with a separate real account, invalid/disabled codes and
+existing owner/admin membership. Removed-member bans and restricted invite-code
+reads are not implemented yet; rotate the invite after member removal as an
+interim operational precaution, not as a substitute for a ban model.

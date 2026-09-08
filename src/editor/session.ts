@@ -196,6 +196,7 @@ export class EditorSession {
   }
 
   markDirty(_kind: string): void {
+    this.saveState.set('saving');
     this.doc.updatedAt = nowIso();
     this.doc.version++;
     this.rev.set(this.rev.get() + 1);

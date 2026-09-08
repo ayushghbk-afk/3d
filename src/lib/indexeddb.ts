@@ -36,9 +36,16 @@ async function tx<T>(store: string, mode: IDBTransactionMode, fn: (s: IDBObjectS
   return new Promise((resolve, reject) => {
     const t = db.transaction(store, mode);
     const req = fn(t.objectStore(store));
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-    t.oncomplete = () => db.close();
+    // Request success is not a durable acknowledgement: the transaction can
+    // still abort (quota, another request, or an explicit abort).
+    t.oncomplete = () => {
+      db.close();
+      resolve(req.result);
+    };
+    t.onabort = () => {
+      db.close();
+      reject(t.error ?? new DOMException('IndexedDB transaction aborted', 'AbortError'));
+    };
     t.onerror = () => {
       db.close();
       reject(t.error);
@@ -117,6 +124,10 @@ export const localDb = {
       t.oncomplete = () => {
         db.close();
         resolve();
+      };
+      t.onabort = () => {
+        db.close();
+        reject(t.error ?? new DOMException('IndexedDB transaction aborted', 'AbortError'));
       };
       t.onerror = () => {
         db.close();

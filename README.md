@@ -42,8 +42,11 @@ npm run preview:pages   # http://localhost:4174/3d/
 
 For a **fresh** Supabase project, run [`supabase/setup.sql`](supabase/setup.sql)
 in the SQL editor. For an existing installation, apply only the missing files
-in `supabase/migrations/`, in filename order. The new repair migration is
-`20260908000003_cloud_repairs.sql`; it does not delete user data.
+in `supabase/migrations/`, in filename order. The repair migrations include
+`20260908000003_cloud_repairs.sql` and
+`20260908000004_scene_project_integrity.sql`; neither deletes user data.
+See the deployment guide for legacy-integrity validation before declaring an
+existing database clean.
 
 Enable Email auth and allow `https://ayushghbk-afk.github.io/3d/` as both the
 Site URL and an allowed Redirect URL. Full instructions and troubleshooting are
