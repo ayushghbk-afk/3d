@@ -76,6 +76,8 @@ export class EditorSession {
     normalizeDoc(doc);
     viewport.syncMaterials(doc.materials);
     for (const o of doc.objects) viewport.addObject(o);
+    // Children listed before their parents were parked at the root — attach now.
+    viewport.fixParenting(doc.objects);
     this.applySettings();
 
     this.gizmo = new TransformGizmo(viewport.scene, viewport.camera, viewport.renderer.domElement);
@@ -482,6 +484,10 @@ export class EditorSession {
       if (!local) {
         this.doc.objects.push(incoming);
         this.viewport.addObject(incoming);
+        // A child may have arrived before its parent — attach it now.
+        for (const o of this.doc.objects) {
+          if (o.parentId === incoming.id) this.viewport.updateObject(o);
+        }
         if (incoming.type === 'imported' && incoming.assetId) void this.attachAsset(incoming);
       } else if (incoming.version >= local.version) {
         Object.assign(local, JSON.parse(JSON.stringify(incoming)) as SceneObjectData);
@@ -903,6 +909,7 @@ export class EditorSession {
     this.viewport.clearAll();
     this.viewport.syncMaterials(this.doc.materials);
     for (const o of this.doc.objects) this.viewport.addObject(o);
+    this.viewport.fixParenting(this.doc.objects);
     for (const o of this.doc.objects) {
       if (o.type === 'imported' && o.assetId) void this.attachAsset(o);
     }

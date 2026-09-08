@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildPollinationsImageUrl, texturePrompt } from '../../src/ai/pollinations.js';
 import { parseSseChunk } from '../../src/ai/providers.js';
-import { findGenerateFnIndex, isGlb } from '../../src/ai/triposr.js';
+import { buildSpaceArgs, findGenerateFnIndex, isGlb, makeFileData, parseUploadPaths } from '../../src/ai/triposr.js';
 import { planProcedural } from '../../src/ai/procedural.js';
 import { defaultSettings, normalizeSettings } from '../../src/ai/settings.js';
 
@@ -66,6 +66,38 @@ describe('triposr config discovery', () => {
 
   it('throws a helpful error when the Space UI changed', () => {
     expect(() => findGenerateFnIndex({ components: [], dependencies: [] })).toThrow(/changed its UI/);
+  });
+
+  it('builds queue args from the Space config (image + resolution + defaults)', () => {
+    const file = makeFileData('/tmp/x/input.png', 'input.png', 10, 'image/png');
+    expect(file.url).toBe('/gradio_api/file=/tmp/x/input.png');
+    expect(file.meta).toEqual({ _type: 'gradio.FileData' });
+    const cfg = {
+      components: [
+        { id: 1, type: 'image' },
+        { id: 2, type: 'slider', props: { label: 'Marching Cubes Resolution', value: 256 } },
+        { id: 3, type: 'checkbox', props: { label: 'Fancy', value: true } },
+        { id: 4, type: 'model3d' },
+      ],
+      dependencies: [{ id: 7, inputs: [1, 2, 3], outputs: [4] }],
+    };
+    expect(buildSpaceArgs(cfg, 7, file, 192)).toEqual([file, 192, true]);
+  });
+
+  it('rejects arg-building when the image slot disappears', () => {
+    const file = makeFileData('/tmp/x.png', 'x.png', 1, 'image/png');
+    const cfg = {
+      components: [{ id: 2, type: 'slider' }],
+      dependencies: [{ id: 7, inputs: [2], outputs: [] }],
+    };
+    expect(() => buildSpaceArgs(cfg, 7, file, 192)).toThrow(/no image slot/);
+  });
+
+  it('parses both upload response shapes', () => {
+    expect(parseUploadPaths(['/tmp/a.png', 42])).toEqual(['/tmp/a.png']);
+    expect(parseUploadPaths({ files: [{ path: '/tmp/b.png' }, '/tmp/c.png'] })).toEqual(['/tmp/b.png', '/tmp/c.png']);
+    expect(parseUploadPaths({})).toEqual([]);
+    expect(parseUploadPaths(null)).toEqual([]);
   });
 });
 

@@ -49,14 +49,23 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s: ${url}`)), timeoutMs);
+  // Combine the caller's cancel signal with the timeout: either one aborts.
+  const caller = init.signal;
+  const onCallerAbort = (): void => ctrl.abort(caller?.reason ?? new DOMException('Aborted', 'AbortError'));
+  if (caller) {
+    if (caller.aborted) onCallerAbort();
+    else caller.addEventListener('abort', onCallerAbort, { once: true });
+  }
   try {
-    const res = await fetch(url, { ...init, signal: init.signal ?? ctrl.signal });
+    const { signal: _dropped, ...rest } = init;
+    const res = await fetch(url, { ...rest, signal: ctrl.signal });
     return res;
   } catch (e) {
     if ((e as Error)?.name === 'AbortError' || (e as Error)?.message?.startsWith('Timed out')) throw e;
     throw new ProviderError('network', `Network error calling ${hostOf(url)}: ${(e as Error).message}`, true);
   } finally {
     clearTimeout(timer);
+    caller?.removeEventListener('abort', onCallerAbort);
   }
 }
 

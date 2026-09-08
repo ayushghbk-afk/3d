@@ -11,6 +11,28 @@ export interface ViewportEvents {
   onFrame: (dt: number) => void;
 }
 
+/**
+ * Attach an object under its data parent. Data transforms are ALWAYS local
+ * (`EditorSession.setParent` bakes world→local into data before calling), so
+ * attaching keeps them verbatim.
+ *
+ * Never derive anything from `matrixWorld` here: a freshly loaded object's
+ * matrix is still identity, and doing so resets every object to the origin
+ * on project reopen. Exported pure for unit tests.
+ */
+export function attachToParent(
+  objects: Map<string, THREE.Object3D>,
+  scene: THREE.Object3D,
+  data: { id: string; parentId: string | null },
+): void {
+  const obj = objects.get(data.id);
+  if (!obj) return;
+  // Missing parent (not loaded yet / deleted peer-side): park at root. The
+  // load path re-runs this via fixParenting once every object exists.
+  const parent = data.parentId ? (objects.get(data.parentId) ?? scene) : scene;
+  if (obj.parent !== parent) parent.add(obj);
+}
+
 export class Viewport {
   readonly caps: GpuCaps;
   readonly renderer: THREE.WebGLRenderer;
@@ -303,21 +325,15 @@ export class Viewport {
   }
 
   private reparent(data: SceneObjectData): void {
-    const obj = this.objects.get(data.id);
-    if (!obj) return;
-    const parent = data.parentId ? this.objects.get(data.parentId) : this.scene;
-    if (parent && obj.parent !== parent) {
-      // preserve world transform
-      parent.updateWorldMatrix(true, false);
-      const m = new THREE.Matrix4().copy(obj.matrixWorld);
-      parent.add(obj);
-      const inv = new THREE.Matrix4().copy(parent.matrixWorld).invert();
-      m.premultiply(inv);
-      m.decompose(obj.position, obj.quaternion, obj.scale);
-      obj.rotation.setFromQuaternion(obj.quaternion);
-    } else if (!parent) {
-      this.scene.add(obj);
-    }
+    attachToParent(this.objects, this.scene, data);
+  }
+
+  /**
+   * Second pass after a bulk load: children whose parents arrived later in the
+   * array were parked at the scene root — attach them now (locals intact).
+   */
+  fixParenting(all: SceneObjectData[]): void {
+    for (const d of all) attachToParent(this.objects, this.scene, d);
   }
 
   removeObject(id: string): void {

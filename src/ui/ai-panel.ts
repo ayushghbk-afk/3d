@@ -170,7 +170,15 @@ function renderModelTab(session: EditorSession, body: HTMLElement): void {
       if ((e as Error)?.name === 'AbortError') {
         resultEl.innerHTML = '<p class="muted">Cancelled.</p>';
       } else {
-        resultEl.innerHTML = `<p class="error">Failed: ${escapeHtml((e as Error).message)}</p>`;
+        resultEl.innerHTML = `
+          <div class="banner banner-warn">❌ <b>Generation failed.</b><br />${escapeHtml((e as Error).message)}
+          <br /><span class="small">Common fixes: wait 1–2 min and retry (the free Space sleeps when idle and its queue fills up), check the browser console for the failing stage, or open <a href="#" id="ai3d-err-setup">Setup</a> for offline/custom 3D.</span></div>`;
+        const setupLink = resultEl.querySelector('#ai3d-err-setup') as HTMLElement | null;
+        setupLink?.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          renderTabs(session, root, 'settings');
+        });
+        console.warn('[ai] model.generate failed at stage:', stageEl.textContent, e);
       }
     } finally {
       goBtn.disabled = false;

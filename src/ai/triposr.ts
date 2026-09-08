@@ -22,8 +22,42 @@ const MC_RESOLUTION: Record<NonNullable<MeshGenOptions['quality']>, number> = {
 // ---------- pure config parsing (unit-tested) ----------
 
 interface GradioConfig {
-  components?: { id: number; type: string }[];
+  components?: { id: number; type: string; props?: Record<string, unknown> }[];
   dependencies?: { id: number; inputs?: number[]; outputs?: number[] }[];
+}
+
+/** File payload shaped exactly like Gradio's own client sends it. */
+export interface SpaceFileData {
+  path: string;
+  url: string;
+  orig_name: string;
+  size: number;
+  mime_type: string;
+  meta: { _type: 'gradio.FileData' };
+}
+
+export function makeFileData(serverPath: string, name: string, size: number, mime: string): SpaceFileData {
+  const clean = serverPath.startsWith('/') ? serverPath : `/${serverPath}`;
+  return {
+    path: serverPath,
+    url: `/gradio_api/file=${clean}`,
+    orig_name: name,
+    size,
+    mime_type: mime,
+    meta: { _type: 'gradio.FileData' },
+  };
+}
+
+/** `/gradio_api/upload` returns `[paths]` (older) or `{files:[...]}` (newer). */
+export function parseUploadPaths(json: unknown): string[] {
+  if (Array.isArray(json)) return json.filter((p): p is string => typeof p === 'string');
+  const files = (json as { files?: unknown } | null)?.files;
+  if (Array.isArray(files)) {
+    return files
+      .map((f) => (typeof f === 'string' ? f : (f as { path?: unknown } | null)?.path))
+      .filter((p): p is string => typeof p === 'string');
+  }
+  return [];
 }
 
 /** Find the image→3D dependency: one image-ish input + a Model3D output. */
@@ -50,6 +84,49 @@ export function findGenerateFnIndex(config: GradioConfig): number {
     if ((d.outputs ?? []).some(isModelOutput)) return d.id;
   }
   throw new ProviderError('triposr', 'The 3D Space changed its UI — could not find the Generate action. Try a custom 3D API instead.');
+}
+
+/**
+ * Build the queue/join `data` array from the Space's own config: the image
+ * slot gets our file, quality-ish sliders get our resolution, everything else
+ * gets its default. Survives UI drift and user-overridden Spaces.
+ */
+export function buildSpaceArgs(
+  config: GradioConfig,
+  fnIndex: number,
+  file: SpaceFileData,
+  mcResolution: number,
+): unknown[] {
+  const dep = (config.dependencies ?? []).find((d) => d.id === fnIndex);
+  if (!dep) throw new ProviderError('triposr', 'The Generate action vanished from the 3D Space config — retry in a minute.');
+  const byId = new Map<number, { type: string; props: Record<string, unknown> }>();
+  for (const c of config.components ?? []) {
+    byId.set(c.id, { type: String(c.type).toLowerCase(), props: (c.props ?? {}) as Record<string, unknown> });
+  }
+  let usedImage = false;
+  const args = (dep.inputs ?? []).map((id) => {
+    const comp = byId.get(id);
+    const t = comp?.type ?? '';
+    const props = comp?.props ?? {};
+    if (t.includes('image') && !usedImage) {
+      usedImage = true;
+      return file;
+    }
+    if (t.includes('slider') || t.includes('number')) {
+      const label = String(props.label ?? '').toLowerCase();
+      if (label.includes('resolution') || label.includes('marching') || label.includes('mc_') || label.includes('quality') || !label) {
+        return mcResolution;
+      }
+      return typeof props.value === 'number' ? props.value : 0;
+    }
+    if (t.includes('checkbox')) return props.value ?? false;
+    if (t.includes('textbox') || t.includes('dropdown') || t.includes('radio')) return props.value ?? '';
+    return props.value ?? null;
+  });
+  if (!usedImage) {
+    throw new ProviderError('triposr', 'The 3D Space changed its inputs (no image slot found). Try a custom 3D API instead.');
+  }
+  return args;
 }
 
 interface GradioFileData {
@@ -156,10 +233,25 @@ export class TripoSRMeshProvider implements MeshProvider {
     // 1) Space config (with wake-up retries: a sleeping Space 503s).
     progress('waking the free 3D service', 0.02);
     let fnIndex = this.fnIndexCache;
+    let config: GradioConfig | null = null;
     if (fnIndex === null) {
-      const config = await this.fetchConfigWithWakeup(signal, progress);
+      config = await this.fetchConfigWithWakeup(signal, progress);
       fnIndex = findGenerateFnIndex(config);
       this.fnIndexCache = fnIndex;
+    } else {
+      // Cached action id, but still refresh the input layout (cheap, cached by CDN).
+      try {
+        const res = await fetchWithTimeout(`${this.space}/config.json`, { signal, headers: this.authHeaders() }, 30000);
+        const text = await res.text();
+        if (res.ok && text.trim().startsWith('{')) config = JSON.parse(text) as GradioConfig;
+      } catch {
+        /* fall through to rediscovery below */
+      }
+      if (!config) {
+        config = await this.fetchConfigWithWakeup(signal, progress);
+        fnIndex = findGenerateFnIndex(config);
+        this.fnIndexCache = fnIndex;
+      }
     }
 
     // 2) Upload the image.
@@ -172,40 +264,16 @@ export class TripoSRMeshProvider implements MeshProvider {
       120000,
     );
     if (!uploadRes.ok) {
-      throw new ProviderError('triposr', `Upload failed: HTTP ${uploadRes.status}`, uploadRes.status >= 500);
+      throw this.httpError('upload', uploadRes.status, await uploadRes.text().catch(() => ''));
     }
-    const uploaded = (await uploadRes.json()) as string[];
-    const serverPath = uploaded?.[0];
-    if (!serverPath) throw new ProviderError('triposr', 'Upload returned no file path.', true);
+    const serverPath = parseUploadPaths(await uploadRes.json().catch(() => null))[0];
+    if (!serverPath) throw new ProviderError('triposr', '3D upload returned no file path — the free Space may be updating. Retry in a minute.', true);
 
-    // 3) Join the generation queue.
-    progress('queued', 0.2);
+    // 3) Join the generation queue (with retries: the free queue fills up).
     const hash = sessionHash();
-    const fileData = {
-      path: serverPath,
-      orig_name: 'input.png',
-      size: image.size,
-      mime_type: image.type || 'image/png',
-      meta: { _type: 'gradio.FileData' },
-    };
-    const joinRes = await fetchWithTimeout(
-      `${this.space}/gradio_api/queue/join`,
-      {
-        method: 'POST',
-        signal,
-        headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
-        body: JSON.stringify({ data: [fileData, mcResolution], fn_index: fnIndex, session_hash: hash }),
-      },
-      60000,
-    );
-    if (!joinRes.ok) {
-      this.fnIndexCache = null; // UI may have changed; rediscover next time.
-      throw new ProviderError(
-        'triposr',
-        `Queue join failed: HTTP ${joinRes.status} — the free Space may be overloaded, retry shortly.`,
-        joinRes.status >= 500,
-      );
-    }
+    const fileData = makeFileData(serverPath, 'input.png', image.size, image.type || 'image/png');
+    const data = buildSpaceArgs(config, fnIndex, fileData, mcResolution);
+    await this.joinWithRetry(fnIndex, data, hash, signal, progress);
 
     // 4) Stream progress until completion.
     let glbFile: GradioFileData | null = null;
@@ -239,7 +307,13 @@ export class TripoSRMeshProvider implements MeshProvider {
         }
         if (event === 'process_completed') {
           try {
-            const j = JSON.parse(data) as { output?: { data?: unknown[] }; success?: boolean };
+            const j = JSON.parse(data) as { output?: { data?: unknown[]; error?: unknown }; success?: boolean };
+            if (j.success === false) {
+              const msg = typeof j.output?.error === 'string' && j.output.error
+                ? j.output.error.slice(0, 200)
+                : 'the Space rejected this image';
+              throw new ProviderError('triposr', `The 3D Space failed to generate (${msg}). Try a clearer single-object image or retry.`, true);
+            }
             const out = j.output?.data ?? [];
             // TripoSR outputs: [processed_image, obj_file, glb_file]
             for (const item of out) {
@@ -286,6 +360,56 @@ export class TripoSRMeshProvider implements MeshProvider {
     if (!isGlb(glb)) throw new ProviderError('triposr', 'Downloaded file is not a GLB model.', false);
     progress('done', 1);
     return { glb, provider: this.id, prompt: '', previewDataUrl: null };
+  }
+
+  /** Join the queue, riding out 429/503 busy spells with backoff. */
+  private async joinWithRetry(
+    fnIndex: number,
+    data: unknown[],
+    hash: string,
+    signal: AbortSignal | undefined,
+    progress: (stage: string, frac: number) => void,
+  ): Promise<void> {
+    const attempts = 12;
+    for (let i = 0; i < attempts; i++) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      progress(i === 0 ? 'joining queue' : `queue busy, retrying (${i + 1}/${attempts})`, 0.2);
+      const res = await fetchWithTimeout(
+        `${this.space}/gradio_api/queue/join`,
+        {
+          method: 'POST',
+          signal,
+          headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
+          body: JSON.stringify({ data, fn_index: fnIndex, session_hash: hash }),
+        },
+        60000,
+      );
+      if (res.ok) return;
+      if (res.status === 429 || res.status === 503) {
+        await sleep(Math.min(15000, 2000 * (i + 1)), signal);
+        continue;
+      }
+      this.fnIndexCache = null; // UI may have changed; rediscover next time.
+      throw this.httpError('queue join', res.status, await res.text().catch(() => ''));
+    }
+    throw new ProviderError(
+      'triposr',
+      'The free 3D queue stayed full for 2 minutes. Retry shortly, add a free Hugging Face token in ✨ AI → Setup for priority, or switch to offline/custom 3D.',
+      true,
+    );
+  }
+
+  /** Stage-aware HTTP error with ZeroGPU/quota detection. */
+  private httpError(stage: string, status: number, body: string): ProviderError {
+    const clean = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 220);
+    const extra = clean ? ` — ${clean}` : '';
+    let hint = 'Retry shortly.';
+    if (/quota|zerogpu|zero-gpu|gpus? (busy|unavailable)|capacity/i.test(body)) {
+      hint = 'The free GPU capacity is exhausted right now — retry in a few minutes, add a free Hugging Face token in ✨ AI → Setup for priority, or use offline/custom 3D.';
+    } else if (status === 429 || status === 503) {
+      hint = 'The free Space is overloaded — retry shortly or use offline/custom 3D in ✨ AI → Setup.';
+    }
+    return new ProviderError('triposr', `3D ${stage} failed (HTTP ${status})${extra} ${hint}`, status === 429 || status >= 500);
   }
 
   private async fetchConfigWithWakeup(
