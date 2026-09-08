@@ -97,8 +97,8 @@ describe('docking', () => {
     expect(root.querySelector('.dock-handle-right')).not.toBeNull();
     expect(root.querySelector('.dock-handle-top')).not.toBeNull();
     const outliner = root.querySelector('#outliner') as HTMLElement;
-    expect(outliner.style.width).toBe('264px');
-    expect(outliner.style.minWidth).toBe('264px');
+    expect(outliner.style.width).toBe('280px');
+    expect(outliner.style.minWidth).toBe('280px');
     detach();
     expect(root.querySelector('.dock-handle-left')).toBeNull();
   });

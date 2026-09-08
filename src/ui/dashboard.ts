@@ -2,7 +2,7 @@ import { auth } from '../lib/auth.js';
 import { cloudEnabled, cloudConfigError, supabase } from '../lib/supabase.js';
 import { cloudErrorMessage } from '../lib/cloud-errors.js';
 import { localDb } from '../lib/indexeddb.js';
-import { createProjectDoc, type ProjectDoc, type ProjectMode } from '../state/models.js';
+import { createProjectDoc, createStarterProjectDoc, type ProjectDoc, type ProjectMode, type StarterTemplate } from '../state/models.js';
 import { escapeHtml, timeAgo } from '../lib/utils.js';
 import { toast } from './toast.js';
 import { nav } from './router.js';
@@ -35,12 +35,49 @@ export function mountDashboard(root: HTMLElement): () => void {
         </div>
       </header>
       <main class="dash-main">
+        <section class="dash-hero">
+          <div class="dash-hero-copy">
+            <span class="dash-kicker">Browser-based 3D creation</span>
+            <h1>Make something visible in minutes, not after decoding 80 controls.</h1>
+            <p class="muted">Start from a scene, a product mockup, or jump straight into AI. The workflow is simple: create → position → style → preview → export.</p>
+            <div class="dash-actions">
+              <button id="new-project" class="btn btn-primary btn-lg">Start blank</button>
+              <button id="join-btn" class="btn">Join with code</button>
+              <button id="gh-import-btn" class="btn">⬢ Import from GitHub</button>
+            </div>
+            <div class="dash-flow" aria-label="Suggested beginner workflow">
+              <span>Create</span>
+              <span>Position</span>
+              <span>Style</span>
+              <span>Preview</span>
+              <span>Export</span>
+            </div>
+          </div>
+          <div class="hero-preview" aria-hidden="true">
+            <div class="hero-stage"></div>
+            <div class="hero-orb hero-orb-a"></div>
+            <div class="hero-orb hero-orb-b"></div>
+            <div class="hero-shape hero-shape-cube"></div>
+            <div class="hero-shape hero-shape-torus"></div>
+            <div class="hero-shape hero-shape-pill"></div>
+            <div class="hero-glow"></div>
+          </div>
+        </section>
         <div id="mode-banner"></div>
-        <div class="dash-actions">
-          <button id="new-project" class="btn btn-primary btn-lg">+ New Project</button>
-          <button id="join-btn" class="btn">Join with code</button>
-          <button id="gh-import-btn" class="btn">⬢ Import from GitHub</button>
-        </div>
+        <section class="starter-strip">
+          <div class="starter-head row-between">
+            <div>
+              <span class="dash-kicker">Starter scenes</span>
+              <h2 class="dash-section">Pick a first success</h2>
+            </div>
+            <span class="muted small">Each option opens a project you can edit right away.</span>
+          </div>
+          <div class="starter-grid">
+            ${starterCard('product', 'Create a product mockup', 'A lit stage with a stylized product object so you can focus on positioning and materials.', 'Launch mockup')}
+            ${starterCard('lowpoly', 'Make a low-poly scene', 'A tiny scene with ground, cabin, tree, and lighting to remix into your own world.', 'Open scene')}
+            ${starterCard('blank', 'Generate with AI', 'Start with a clean scene and open AI Studio immediately with prompt examples ready.', 'Open AI Studio', true)}
+          </div>
+        </section>
         <h2 class="dash-section">Recent Projects</h2>
         <div id="project-grid" class="project-grid"><p class="muted">Loading…</p></div>
       </main>
@@ -76,6 +113,13 @@ export function mountDashboard(root: HTMLElement): () => void {
     }
   };
 
+  const createStarter = async (template: StarterTemplate, name: string, openAi = false, mode: ProjectMode = 'solo'): Promise<void> => {
+    const u = auth.user.get();
+    const doc = createStarterProjectDoc(name, mode, u?.id ?? 'guest', template);
+    await localDb.saveProject(doc);
+    nav(`#/p/${doc.id}${openAi ? '?open=ai' : ''}`);
+  };
+
   (root.querySelector('#new-project') as HTMLButtonElement).onclick = () => newProjectModal(() => void load());
   (root.querySelector('#join-btn') as HTMLButtonElement).onclick = () => joinModal();
   (root.querySelector('#gh-import-btn') as HTMLButtonElement).onclick = async () => {
@@ -84,6 +128,14 @@ export function mountDashboard(root: HTMLElement): () => void {
     await localDb.saveProject(doc);
     nav(`#/p/${doc.id}?import=github`);
   };
+  root.querySelectorAll<HTMLElement>('[data-create-template]').forEach((btn) => {
+    btn.onclick = () => {
+      const template = (btn.dataset.createTemplate as StarterTemplate) || 'blank';
+      const openAi = btn.dataset.openAi === 'true';
+      const label = btn.dataset.projectName || 'Untitled Project';
+      void createStarter(template, label, openAi);
+    };
+  });
 
   async function load(): Promise<void> {
     const grid = root.querySelector('#project-grid') as HTMLElement;
@@ -155,7 +207,11 @@ export function mountDashboard(root: HTMLElement): () => void {
       if (syncBtn) syncBtn.onclick = () => toast('Open a project to sync its pending changes');
 
       if (!cards.length) {
-        grid.innerHTML = `<div class="empty"><p>No projects yet.</p><p class="muted">Create one to start modeling — phone, tablet or desktop.</p></div>`;
+        grid.innerHTML = `
+          <div class="empty empty-rich">
+            <p class="empty-title">No projects yet — start with something you can see.</p>
+            <p class="muted">Try a starter scene above, or create a blank project if you already know what you want.</p>
+          </div>`;
         return;
       }
       grid.innerHTML = cards
@@ -221,6 +277,7 @@ export function mountDashboard(root: HTMLElement): () => void {
 function newProjectModal(onDone: () => void): void {
   const u = auth.user.get();
   const body = document.createElement('div');
+  let template: StarterTemplate = 'blank';
   body.innerHTML = `
     <label class="field">Name
       <input id="np-name" class="input" value="Untitled Project" maxlength="80" />
@@ -231,7 +288,23 @@ function newProjectModal(onDone: () => void): void {
         <label><input type="radio" name="np-mode" value="team" /> 👥 Team</label>
       </div>
       <p class="muted small">Team projects need a cloud account. You can invite members from the editor.</p>
+    </div>
+    <div class="field">
+      <span class="field-label">Starter scene</span>
+      <div class="starter-grid starter-grid-modal">
+        ${starterChoice('blank', 'Blank canvas', 'Start from an empty scene and add objects yourself.')}
+        ${starterChoice('product', 'Product mockup', 'A staged object and lighting so styling and camera work feel immediate.')}
+        ${starterChoice('lowpoly', 'Low-poly scene', 'A tiny world to remix instead of staring at an empty viewport.')}
+      </div>
     </div>`;
+  body.querySelectorAll<HTMLElement>('[data-starter-choice]').forEach((card) => {
+    card.onclick = () => {
+      template = (card.dataset.starterChoice as StarterTemplate) || 'blank';
+      body.querySelectorAll('[data-starter-choice]').forEach((x) => x.classList.remove('selected'));
+      card.classList.add('selected');
+    };
+  });
+  body.querySelector('[data-starter-choice="blank"]')?.classList.add('selected');
   openModal({
     title: 'New Project',
     body,
@@ -247,7 +320,7 @@ function newProjectModal(onDone: () => void): void {
             nav('#/login');
             return;
           }
-          const doc: ProjectDoc = createProjectDoc(name, mode, u?.id ?? 'guest');
+          const doc: ProjectDoc = createStarterProjectDoc(name, mode, u?.id ?? 'guest', template);
           await localDb.saveProject(doc);
           closeModal();
           onDone();
@@ -296,6 +369,24 @@ function joinModal(): void {
       },
     ],
   });
+}
+
+function starterCard(template: StarterTemplate, title: string, desc: string, cta: string, openAi = false): string {
+  return `
+    <article class="starter-card">
+      <span class="badge badge-dim">${openAi ? 'AI-assisted' : template === 'blank' ? 'Blank' : 'Starter scene'}</span>
+      <h3>${escapeHtml(title)}</h3>
+      <p class="muted">${escapeHtml(desc)}</p>
+      <button class="btn ${openAi ? 'btn-primary' : ''}" data-create-template="${template}" data-open-ai="${openAi}" data-project-name="${escapeHtml(title)}">${escapeHtml(cta)}</button>
+    </article>`;
+}
+
+function starterChoice(template: StarterTemplate, title: string, desc: string): string {
+  return `
+    <button type="button" class="starter-choice" data-starter-choice="${template}">
+      <strong>${escapeHtml(title)}</strong>
+      <span class="muted small">${escapeHtml(desc)}</span>
+    </button>`;
 }
 
 export async function handleJoinRoute(projectId: string, code: string): Promise<void> {

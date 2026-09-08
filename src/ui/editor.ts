@@ -67,10 +67,10 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
         <span id="tb-save" class="badge badge-dim"></span>
         <span class="spacer"></span>
         <span id="tb-presence" class="presence"></span>
-        <button id="tb-members" class="btn btn-sm">👥</button>
-        <button id="tb-ai" class="btn btn-sm" title="AI Studio — toggle (A). Drag, resize, collapse.">✨ AI</button>
-        <button id="tb-github" class="btn btn-sm">⬢ GitHub</button>
-        <button id="tb-menu" class="btn btn-sm">☰</button>
+        <button id="tb-members" class="btn btn-sm">People</button>
+        <button id="tb-ai" class="btn btn-sm" title="AI Studio — toggle (A). Drag, resize, collapse.">AI Studio</button>
+        <button id="tb-github" class="btn btn-sm">GitHub</button>
+        <button id="tb-menu" class="btn btn-sm">More</button>
       </header>
       <div class="editor-main">
         <aside id="rail" class="rail" aria-label="Tools"></aside>
@@ -113,11 +113,12 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     overlay.innerHTML = '';
     setEditorSession(session);
     wire(session);
-    // auto-open GitHub import when navigated from dashboard button
-    if (window.location.hash.includes('import=github')) {
-      history.replaceState(null, '', `#/p/${projectId}`);
-      openGithubImport(session);
-    }
+    const query = new URLSearchParams(window.location.hash.split('?')[1] ?? '');
+    const openPanel = query.get('open');
+    const importSource = query.get('import');
+    if (openPanel || importSource) history.replaceState(null, '', `#/p/${projectId}`);
+    if (importSource === 'github') openGithubImport(session);
+    if (openPanel === 'ai') openAi(session);
     // recovery conflicts
     session.onRecovery = (local, cloud) => {
       const body = document.createElement('div');
@@ -162,8 +163,8 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
 
     // project name (rename on click)
     const refreshName = () => {
-      nameEl.textContent = `🚀 ${s.doc.name}`;
-      modeEl.textContent = s.doc.mode === 'team' ? '👥 Team' : '👤 Solo';
+      nameEl.textContent = s.doc.name;
+      modeEl.textContent = s.doc.mode === 'team' ? 'Team project' : 'Solo project';
       modeEl.className = `badge ${s.doc.mode === 'team' ? 'badge-team' : ''}`;
     };
     unsubs.push(s.rev.subscribe(refreshName));
@@ -209,7 +210,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
       const sel = s.selectedObject();
       const lock = sel ? s.locks.get().get(sel.id) : null;
       const gpu = s.viewport.caps.webgpu ? 'WebGPU-ready' : 'WebGL2';
-      statusEl.textContent = `${gpu} · ${s.doc.objects.length} objects · ${sel ? `Selected: ${sel.name}${lock && lock.id !== s.user().id ? ` (🔒 ${lock.name})` : ''}` : 'Nothing selected'}`;
+      statusEl.textContent = `${gpu} · ${s.doc.objects.length} object${s.doc.objects.length === 1 ? '' : 's'} · ${sel ? `Selected: ${sel.name}${lock && lock.id !== s.user().id ? ` (locked by ${lock.name})` : ''}` : 'Select an object to edit it'}`;
     };
     unsubs.push(s.rev.subscribe(refreshStatus));
     unsubs.push(s.selection.subscribe(refreshStatus));
@@ -265,7 +266,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
 
 // ---------- desktop tool rail ----------
 function buildRail(s: EditorSession, el: HTMLElement): void {
-  const prims: { k: PrimitiveType; icon: string; label: string }[] = [
+  const prims: { k: PrimitiveType; icon: string; label: string; key?: string }[] = [
     { k: 'cube', icon: '▣', label: 'Cube' },
     { k: 'sphere', icon: '●', label: 'Sphere' },
     { k: 'cylinder', icon: '▤', label: 'Cylinder' },
@@ -273,24 +274,34 @@ function buildRail(s: EditorSession, el: HTMLElement): void {
     { k: 'plane', icon: '▱', label: 'Plane' },
     { k: 'torus', icon: '◎', label: 'Torus' },
   ];
+  const toolButton = (attrs: string, icon: string, label: string, key = ''): string => `
+    <button class="rail-btn" ${attrs}>
+      <span class="rail-icon" aria-hidden="true">${icon}</span>
+      <span class="rail-label">${label}</span>
+      ${key ? `<span class="rail-key">${key}</span>` : ''}
+    </button>`;
   el.innerHTML = `
-    <div class="rail-group" role="group" aria-label="Transform">
-      <button class="rail-btn" data-tmode="translate" title="Move (W)">↔</button>
-      <button class="rail-btn" data-tmode="rotate" title="Rotate (E)">🔄</button>
-      <button class="rail-btn" data-tmode="scale" title="Scale (R)">📐</button>
+    <div class="rail-section" role="group" aria-label="Transform tools">
+      <div class="rail-title">Transform</div>
+      ${toolButton('data-tmode="translate" title="Move (W)"', '↔', 'Move', 'W')}
+      ${toolButton('data-tmode="rotate" title="Rotate (E)"', '🔄', 'Rotate', 'E')}
+      ${toolButton('data-tmode="scale" title="Scale (R)"', '📐', 'Scale', 'R')}
     </div>
-    <div class="rail-group" role="group" aria-label="Add primitive">
-      ${prims.map((p) => `<button class="rail-btn" data-prim="${p.k}" title="${p.label}">${p.icon}</button>`).join('')}
+    <div class="rail-section" role="group" aria-label="Add shapes">
+      <div class="rail-title">Create</div>
+      ${prims.map((p) => toolButton(`data-prim="${p.k}" title="Add ${p.label}"`, p.icon, p.label)).join('')}
     </div>
-    <div class="rail-group" role="group" aria-label="Scene">
-      <button class="rail-btn" data-act="group" title="Group">🗂</button>
-      <button class="rail-btn" data-act="light" title="Light">💡</button>
-      <button class="rail-btn" data-act="import" title="Import GLB">📥</button>
-      <button class="rail-btn" data-act="focus" title="Focus (F)">🎯</button>
+    <div class="rail-section" role="group" aria-label="Scene actions">
+      <div class="rail-title">Scene</div>
+      ${toolButton('data-act="group" title="Group selected objects"', '🗂', 'Group')}
+      ${toolButton('data-act="light" title="Add a light"', '💡', 'Light')}
+      ${toolButton('data-act="import" title="Import GLB"', '📥', 'Import GLB')}
+      ${toolButton('data-act="focus" title="Focus selected object (F)"', '🎯', 'Focus', 'F')}
     </div>
-    <div class="rail-group" role="group" aria-label="History">
-      <button class="rail-btn" data-act="undo" title="Undo (Ctrl+Z)">↩</button>
-      <button class="rail-btn" data-act="redo" title="Redo">↪</button>
+    <div class="rail-section" role="group" aria-label="History">
+      <div class="rail-title">History</div>
+      ${toolButton('data-act="undo" title="Undo (Ctrl+Z)"', '↩', 'Undo')}
+      ${toolButton('data-act="redo" title="Redo (Ctrl+Shift+Z)"', '↪', 'Redo')}
     </div>`;
   el.querySelectorAll('[data-tmode]').forEach((b) => {
     (b as HTMLButtonElement).onclick = () => {
@@ -388,21 +399,24 @@ function openEditorMenu(s: EditorSession, togglePlay: () => void): void {
   const body = document.createElement('div');
   body.className = 'menu-list';
   const items: { label: string; fn: () => void }[] = [
-    { label: '💾 Save now', fn: () => void s.forceSave().then(() => toast('Saved', 'success')) },
-    { label: '✨ AI Studio — toggle (A)', fn: () => openAi(s) },
-    { label: '📥 Import GLB', fn: () => void importGlb(s) },
-    { label: '📤 Export GLB', fn: () => void s.exportGlb() },
-    { label: '⬢ GitHub import / export', fn: () => openGithubMenu(s) },
-    { label: '👥 Members & invites', fn: () => openMembersModal(s) },
-    { label: '🕘 Version history', fn: () => openVersionsModal(s) },
-    { label: '⌨ Shortcuts', fn: () => openShortcutsModal() },
-    { label: s.shadingMode.get() === 'wireframe' ? '▣ Shading: Solid' : '🕸 Shading: Wireframe', fn: () => s.shadingMode.set(s.shadingMode.get() === 'wireframe' ? 'material' : 'wireframe') },
-    { label: s.cameraType.get() === 'perspective' ? '📷 Camera: Ortho' : '📷 Camera: Perspective', fn: () => s.cameraType.set(s.cameraType.get() === 'perspective' ? 'orthographic' : 'perspective') },
-    { label: s.playback.playing ? '⏸ Pause' : '▶ Play', fn: () => togglePlay() },
-    { label: '◉ Add keyframe (all)', fn: () => s.addKeyframeAll() },
-    { label: '← Back to projects', fn: () => nav('#/') },
+    { label: 'Save now', fn: () => void s.forceSave().then(() => toast('Saved', 'success')) },
+    { label: 'Open AI Studio', fn: () => openAi(s) },
+    { label: 'Import GLB', fn: () => void importGlb(s) },
+    { label: 'Export GLB', fn: () => void s.exportGlb() },
+    { label: 'GitHub import / export', fn: () => openGithubMenu(s) },
+    { label: 'Members & invites', fn: () => openMembersModal(s) },
+    { label: 'Version history', fn: () => openVersionsModal(s) },
+    { label: 'Shortcuts', fn: () => openShortcutsModal() },
+    { label: s.shadingMode.get() === 'wireframe' ? 'Shading: Solid' : 'Shading: Wireframe', fn: () => s.shadingMode.set(s.shadingMode.get() === 'wireframe' ? 'material' : 'wireframe') },
+    { label: s.cameraType.get() === 'perspective' ? 'Camera: Ortho' : 'Camera: Perspective', fn: () => s.cameraType.set(s.cameraType.get() === 'perspective' ? 'orthographic' : 'perspective') },
+    { label: s.playback.playing ? 'Pause' : 'Play', fn: () => togglePlay() },
+    { label: 'Add keyframe (all)', fn: () => s.addKeyframeAll() },
+    { label: 'Back to projects', fn: () => nav('#/') },
   ];
-  if (!cloudEnabled) items.splice(4, 2);
+  if (!cloudEnabled) {
+    const idx = items.findIndex((it) => it.label === 'Members & invites');
+    if (idx >= 0) items.splice(idx, 1);
+  }
   for (const it of items) {
     const b = document.createElement('button');
     b.className = 'btn btn-block menu-item';

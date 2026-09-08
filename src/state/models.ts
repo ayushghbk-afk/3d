@@ -3,6 +3,7 @@ import { uid, nowIso } from '../lib/utils.js';
 export type ProjectMode = 'solo' | 'team';
 export type TeamRole = 'owner' | 'admin' | 'editor' | 'animator' | 'viewer';
 export type PrimitiveType = 'cube' | 'sphere' | 'cylinder' | 'cone' | 'plane' | 'torus';
+export type StarterTemplate = 'blank' | 'product' | 'lowpoly';
 export type ObjectType = PrimitiveType | 'group' | 'imported' | 'light';
 export type ShadingMode = 'solid' | 'material' | 'wireframe';
 export type TransformMode = 'translate' | 'rotate' | 'scale';
@@ -213,6 +214,137 @@ export function createProjectDoc(name: string, mode: ProjectMode, ownerId: strin
     version: 1,
     cloudVersion: 0,
   };
+}
+
+function starterMaterial(name: string, patch: Partial<MaterialData>): MaterialData {
+  return { ...defaultMaterial(name), ...patch, updatedAt: nowIso() };
+}
+
+function starterObject(
+  kind: PrimitiveType | 'light',
+  name: string,
+  opts: {
+    materialId?: string | null;
+    position?: Vec3;
+    rotation?: Vec3;
+    scale?: Vec3;
+    light?: Partial<LightData>;
+  } = {},
+): SceneObjectData {
+  const obj = defaultObject(kind, name);
+  obj.materialId = opts.materialId ?? obj.materialId;
+  obj.position = opts.position ?? obj.position;
+  obj.rotation = opts.rotation ?? obj.rotation;
+  obj.scale = opts.scale ?? obj.scale;
+  if (kind === 'light') obj.light = { ...defaultLight('point'), ...(opts.light ?? {}) };
+  return obj;
+}
+
+export function applyStarterTemplate(doc: ProjectDoc, template: StarterTemplate): ProjectDoc {
+  if (template === 'blank') return doc;
+
+  const base = doc.materials[0];
+  const floor = starterMaterial('Floor', { baseColor: '#18202f', roughness: 0.92, metalness: 0 });
+  const accent = starterMaterial('Accent', { baseColor: '#7c99ff', roughness: 0.28, metalness: 0.18 });
+  const glow = starterMaterial('Glow', { baseColor: '#f6f7fb', roughness: 0.18, emissive: '#8ab4ff', emissiveIntensity: 1.35, metalness: 0.02 });
+  const warm = starterMaterial('Warm', { baseColor: '#f59e0b', roughness: 0.4, metalness: 0.08 });
+  const leaf = starterMaterial('Leaf', { baseColor: '#34d399', roughness: 0.86, metalness: 0 });
+
+  if (template === 'product') {
+    Object.assign(base, { name: 'Shell', baseColor: '#e8eefc', roughness: 0.2, metalness: 0.08, updatedAt: nowIso() });
+    doc.materials.push(floor, accent, glow);
+    doc.objects = [
+      starterObject('plane', 'Stage', {
+        materialId: floor.id,
+        position: v3(0, -0.8, 0),
+        rotation: v3(-Math.PI / 2, 0, 0),
+        scale: v3(7, 1, 7),
+      }),
+      starterObject('cylinder', 'Body', {
+        materialId: base.id,
+        scale: v3(1.05, 1.5, 1.05),
+      }),
+      starterObject('sphere', 'Cap', {
+        materialId: accent.id,
+        position: v3(0, 1.65, 0),
+        scale: v3(0.72, 0.72, 0.72),
+      }),
+      starterObject('torus', 'Ring', {
+        materialId: glow.id,
+        position: v3(0, -0.05, 0),
+        rotation: v3(Math.PI / 2, 0, 0),
+        scale: v3(1.5, 1.5, 1.5),
+      }),
+      starterObject('cube', 'Button', {
+        materialId: accent.id,
+        position: v3(0, 0.15, 0.95),
+        rotation: v3(0.1, 0.35, 0),
+        scale: v3(0.32, 0.14, 0.18),
+      }),
+      starterObject('light', 'Key Light', {
+        position: v3(3, 4, 2),
+        light: { kind: 'directional', intensity: 1.8, castShadow: true },
+      }),
+      starterObject('light', 'Fill Light', {
+        position: v3(-2.4, 1.8, 2.4),
+        light: { kind: 'point', intensity: 14, distance: 18 },
+      }),
+    ];
+  }
+
+  if (template === 'lowpoly') {
+    Object.assign(base, { name: 'Stone', baseColor: '#94a3b8', roughness: 0.88, metalness: 0, updatedAt: nowIso() });
+    doc.materials.push(floor, warm, leaf, accent);
+    doc.objects = [
+      starterObject('plane', 'Ground', {
+        materialId: floor.id,
+        position: v3(0, -0.95, 0),
+        rotation: v3(-Math.PI / 2, 0, 0),
+        scale: v3(10, 1, 10),
+      }),
+      starterObject('cube', 'Cabin', {
+        materialId: warm.id,
+        position: v3(-1.35, -0.1, 0),
+        scale: v3(1.2, 1.2, 1.2),
+      }),
+      starterObject('cone', 'Roof', {
+        materialId: accent.id,
+        position: v3(-1.35, 1.05, 0),
+        scale: v3(1.08, 0.95, 1.08),
+      }),
+      starterObject('cylinder', 'Tree trunk', {
+        materialId: warm.id,
+        position: v3(1.4, -0.1, -0.4),
+        scale: v3(0.28, 1, 0.28),
+      }),
+      starterObject('cone', 'Tree canopy', {
+        materialId: leaf.id,
+        position: v3(1.4, 1.12, -0.4),
+        scale: v3(1.08, 1.5, 1.08),
+      }),
+      starterObject('sphere', 'Sun', {
+        materialId: glow.id,
+        position: v3(2.7, 2.5, -2.4),
+        scale: v3(0.45, 0.45, 0.45),
+      }),
+      starterObject('light', 'Sun Light', {
+        position: v3(2.8, 4.5, 1.8),
+        light: { kind: 'directional', intensity: 1.55, castShadow: true },
+      }),
+      starterObject('light', 'Sky Light', {
+        position: v3(0, 3, 0),
+        light: { kind: 'hemisphere', intensity: 0.85 },
+      }),
+    ];
+    if (!doc.materials.find((m) => m.id === glow.id)) doc.materials.push(glow);
+  }
+
+  doc.updatedAt = nowIso();
+  return doc;
+}
+
+export function createStarterProjectDoc(name: string, mode: ProjectMode, ownerId: string, template: StarterTemplate = 'blank'): ProjectDoc {
+  return applyStarterTemplate(createProjectDoc(name, mode, ownerId), template);
 }
 
 /** Fill defaults for docs written by older app versions (local + cloud). */
