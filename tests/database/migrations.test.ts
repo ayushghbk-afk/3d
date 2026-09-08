@@ -176,3 +176,49 @@ describe('upserts and private Realtime', () => {
     expect((await db.query('select public.realtime_project_id($1) as id', ['project:bad'])).rows).toEqual([{ id: null }]);
   });
 });
+
+describe('scene/project composite integrity', () => {
+  const otherProject = '10000000-0000-4000-8000-000000000002';
+  const scene = '30000000-0000-4000-8000-000000000001';
+  beforeEach(async () => {
+    await db.query('insert into public.projects(id,owner_id) values ($1,$2)', [otherProject, owner]);
+    await db.query('insert into public.scenes(id,project_id) values ($1,$2)', [scene, project]);
+  });
+  it.each(['scene_objects', 'materials', 'animations'])('rejects mismatched %s even for an owner of both projects', async (table) => {
+    await asUser(owner);
+    await expect(db.query(`insert into public.${table}(scene_id,project_id) values ($1,$2)`, [scene, otherProject]))
+      .rejects.toThrow(/foreign key constraint/);
+  });
+  it.each(['scene_objects', 'materials', 'animations'])('accepts matching %s and cascades scene deletion', async (table) => {
+    await asUser(owner);
+    await db.query(`insert into public.${table}(scene_id,project_id) values ($1,$2)`, [scene, project]);
+    await db.query('delete from public.scenes where id = $1', [scene]);
+    expect((await db.query(`select * from public.${table}`)).rows).toHaveLength(0);
+  });
+  it('rejects reassigning a populated scene to another project', async () => {
+    await db.query('insert into public.scene_objects(scene_id,project_id) values ($1,$2)', [scene, project]);
+    await expect(db.query('update public.scenes set project_id = $1 where id = $2', [otherProject, scene]))
+      .rejects.toThrow(/foreign key constraint/);
+  });
+  it('preserves inconsistent legacy data on upgrade, blocks new violations, and supports later validation', async () => {
+    await db.exec('alter table public.scene_objects drop constraint scene_objects_scene_project_fkey');
+    await db.query('insert into public.scene_objects(scene_id,project_id) values ($1,$2)', [scene, otherProject]);
+    const migration = await readFile(new URL('20260908000004_scene_project_integrity.sql', migrations), 'utf8');
+    await db.exec(migration);
+    expect((await db.query('select * from public.scene_objects')).rows).toHaveLength(1);
+    expect((await db.query("select convalidated from pg_constraint where conname = 'scene_objects_scene_project_fkey'")).rows)
+      .toEqual([{ convalidated: false }]);
+    await db.exec('savepoint invalid_write');
+    await expect(db.query('insert into public.scene_objects(scene_id,project_id) values ($1,$2)', [scene, otherProject]))
+      .rejects.toThrow(/foreign key constraint/);
+    await db.exec('rollback to savepoint invalid_write');
+    await db.query('update public.scene_objects set project_id = $1', [project]);
+    await db.exec(migration);
+    expect((await db.query("select convalidated from pg_constraint where conname = 'scene_objects_scene_project_fkey'")).rows)
+      .toEqual([{ convalidated: true }]);
+  });
+  it('keeps the named join RPC contract unchanged', async () => {
+    const { rows } = await db.query("select pg_get_function_identity_arguments(oid) as args, pg_get_function_result(oid) as result from pg_proc where oid = 'public.join_project(uuid,text)'::regprocedure");
+    expect(rows).toEqual([{ args: 'p_project_id uuid, p_code text', result: 'void' }]);
+  });
+});
