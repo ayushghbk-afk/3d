@@ -5,30 +5,47 @@ import type { PrimitiveType } from '../state/models.js';
 import { toAiContext } from '../editor/serialization.js';
 import { escapeHtml } from '../lib/utils.js';
 import { toast } from './toast.js';
-import { openModal } from './modals.js';
+import { closeFloatWin, getFloatWin, openFloatWin } from './floatwin.js';
 import {
   aiSettings, createAgentToken, flushAiSettings, loadAiSettings, revokeAgentToken, updateAiSettings,
 } from '../ai/settings.js';
 import { generateImageSmart, generateMeshSmart, getChatProvider, getImageProvider, getMeshProvider } from '../ai/factory.js';
 import { texturePrompt } from '../ai/pollinations.js';
 import { getAgent, getRelay } from '../ai/index.js';
+import type { AgentContext } from '../ai/agent-api.js';
+import type { IdentifiedGroup } from '../ai/scene-iq.js';
 import { bridgeStatus, snippetChannel, snippetCurlRelay, snippetJs, snippetPostMessage } from '../ai/bridge.js';
 import { checkRelayHealth, relayStatus } from '../ai/relay.js';
 import type { AgentScope } from '../ai/types.js';
 
-type AiTab = 'model' | 'texture' | 'ask' | 'agent' | 'settings';
+type AiTab = 'model' | 'texture' | 'paint' | 'ask' | 'agent' | 'settings';
 
+/**
+ * Show the floating ✨ AI Studio: draggable, resizable and collapsible, so it
+ * never has to block the 3D scene. Geometry persists across visits.
+ */
 export function openAiPanel(session: EditorSession, initialTab: AiTab = 'model'): void {
-  const root = document.createElement('div');
-  root.className = 'ai-panel';
-  openModal({ title: '✨ AI Studio', body: root, wide: true });
-  void loadAiSettings().then(() => renderTabs(session, root, initialTab));
+  const win = openFloatWin({ id: 'ai-studio', title: '✨ AI Studio', width: 640, height: 560 });
+  win.body.classList.add('ai-panel');
+  void loadAiSettings().then(() => {
+    if (document.contains(win.body)) renderTabs(session, win.body, initialTab);
+  });
+}
+
+/** Toggle the floating ✨ AI Studio (toolbar button + `A` shortcut). */
+export function toggleAiPanel(session: EditorSession, initialTab: AiTab = 'model'): void {
+  if (getFloatWin('ai-studio')) {
+    closeFloatWin('ai-studio');
+    return;
+  }
+  openAiPanel(session, initialTab);
 }
 
 function renderTabs(session: EditorSession, root: HTMLElement, active: AiTab): void {
   const tabs: { id: AiTab; label: string }[] = [
     { id: 'model', label: '🧊 3D Model' },
     { id: 'texture', label: '🎨 Texture' },
+    { id: 'paint', label: '🖌️ Paint' },
     { id: 'ask', label: '💬 Ask' },
     { id: 'agent', label: '🤖 Agent API' },
     { id: 'settings', label: '⚙️ Setup' },
@@ -44,6 +61,7 @@ function renderTabs(session: EditorSession, root: HTMLElement, active: AiTab): v
   });
   if (active === 'model') renderModelTab(session, body);
   else if (active === 'texture') renderTextureTab(session, body);
+  else if (active === 'paint') renderPaintTab(session, body);
   else if (active === 'ask') renderAskTab(session, body);
   else if (active === 'agent') renderAgentTab(body);
   else renderSettingsTab(body);
@@ -302,6 +320,182 @@ function renderTextureTab(session: EditorSession, body: HTMLElement): void {
       ctrl = null;
     }
   };
+}
+
+// =====================================================================
+// Tab: scene paint — AI looks at groups, then paints / textures / tidies
+// =====================================================================
+
+const PAINT_CTX: AgentContext = { actor: 'ui:ai-studio', transport: 'page', token: null };
+
+function renderPaintTab(session: EditorSession, body: HTMLElement): void {
+  body.innerHTML = `
+    <div class="banner banner-info">The AI <b>looks at your groups</b> to work out what each model is (chair, car, lamp…) and which part is which — then paints, textures or tidies the whole scene at once. One <b>Undo</b> (Ctrl+Z) reverts a whole paint job.</div>
+    <div class="row-between">
+      <button class="btn btn-sm" id="aipaint-analyze">🔍 Analyze scene</button>
+      <span>
+        <button class="btn btn-sm" id="aipaint-tidy" title="Arrange top-level models in a tidy grid">🧹 Tidy</button>
+        <button class="btn btn-sm" id="aipaint-go" title="Coherent colors per part role (fast, offline)">🖌️ Auto-paint</button>
+        <button class="btn btn-sm btn-primary" id="aipaint-tex" title="Auto-paint + one AI texture per part role (slow)">✨ Paint + texture</button>
+      </span>
+    </div>
+    <div class="row-between" style="margin-top:6px">
+      <label class="field">Texture size
+        <select id="aipaint-size" class="input input-sm">
+          <option value="256">256</option>
+          <option value="512" selected>512</option>
+          <option value="1024">1024</option>
+        </select>
+      </label>
+      <label class="field">Max textures
+        <select id="aipaint-max" class="input input-sm">
+          <option value="2">2</option>
+          <option value="4" selected>4</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select>
+      </label>
+      <span class="small muted">Free tier ≈ 1 image / 15s.</span>
+    </div>
+    <div id="aipaint-progress" class="ai-progress" hidden>
+      <div class="ai-progress-bar"><div id="aipaint-bar" class="ai-progress-busy"></div></div>
+      <div id="aipaint-stage" class="small muted"></div>
+    </div>
+    <div id="aipaint-groups" style="margin-top:8px"></div>
+    <div id="aipaint-result" style="margin-top:8px"></div>`;
+
+  const agent = getAgent();
+  const projectId = session.doc.id;
+  const groupsEl = body.querySelector('#aipaint-groups') as HTMLElement;
+  const resultEl = body.querySelector('#aipaint-result') as HTMLElement;
+  const progressEl = body.querySelector('#aipaint-progress') as HTMLElement;
+  const stageEl = body.querySelector('#aipaint-stage') as HTMLElement;
+  const barEl = body.querySelector('#aipaint-bar') as HTMLElement;
+  const btns = [...body.querySelectorAll('button')] as HTMLButtonElement[];
+
+  const setBusy = (busy: boolean, stage: string): void => {
+    btns.forEach((b) => {
+      b.disabled = busy;
+    });
+    progressEl.hidden = !busy;
+    stageEl.textContent = stage;
+    barEl.style.width = busy ? '100%' : '0%';
+  };
+  const fail = (e: unknown): void => {
+    setBusy(false, '');
+    resultEl.innerHTML = `<div class="banner banner-warn">❌ ${escapeHtml((e as Error).message ?? String(e))}</div>`;
+  };
+
+  const paintOne = async (groupId: string, label: string): Promise<void> => {
+    setBusy(true, `painting ${label}…`);
+    try {
+      const out = (await agent.call('scene.autopaint', { projectId, groupIds: [groupId] }, PAINT_CTX)) as {
+        applied: number;
+      };
+      setBusy(false, '');
+      resultEl.innerHTML = `<div class="banner banner-info">✅ Painted <b>${escapeHtml(label)}</b> (${out.applied} parts). Undo reverts it.</div>`;
+      toast(`Painted ${label}`, 'success');
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const renderGroups = (groups: IdentifiedGroup[]): void => {
+    groupsEl.innerHTML = groups.length
+      ? groups
+          .map(
+            (g) => `
+        <div class="ai-group-card">
+          <div class="ai-group-head">
+            <span><b>${escapeHtml(g.label)}</b> <span class="muted small">“${escapeHtml(g.groupName)}” · ${Math.round(g.confidence * 100)}%</span></span>
+            ${g.groupId ? `<button class="btn btn-xs" data-paint-group="${escapeHtml(g.groupId)}" data-paint-label="${escapeHtml(g.label)}">🖌️ Paint</button>` : ''}
+          </div>
+          <div class="ai-chips">
+            ${g.parts
+              .map(
+                (p) => `<span class="ai-chip" title="${escapeHtml(p.type)}">${p.style ? `<i style="background:${escapeHtml(p.style.color)}"></i>` : ''}${escapeHtml(p.name)} → <b>${escapeHtml(p.role)}</b></span>`,
+              )
+              .join('')}
+          </div>
+        </div>`,
+          )
+          .join('')
+      : '<p class="muted small">No groups found — select parts and press Group first.</p>';
+    groupsEl.querySelectorAll('[data-paint-group]').forEach((b) => {
+      (b as HTMLButtonElement).onclick = () => {
+        const id = (b as HTMLElement).dataset.paintGroup as string;
+        const label = (b as HTMLElement).dataset.paintLabel as string;
+        void paintOne(id, label);
+      };
+    });
+  };
+
+  (body.querySelector('#aipaint-analyze') as HTMLButtonElement).onclick = async () => {
+    setBusy(true, 'reading groups…');
+    resultEl.innerHTML = '';
+    try {
+      const out = (await agent.call('scene.analyze', { projectId }, PAINT_CTX)) as {
+        summary: string;
+        groups: IdentifiedGroup[];
+      };
+      setBusy(false, '');
+      renderGroups(out.groups);
+      resultEl.innerHTML = `<p class="small muted">${escapeHtml(out.summary)}</p>`;
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  (body.querySelector('#aipaint-go') as HTMLButtonElement).onclick = async () => {
+    setBusy(true, 'painting every recognized part…');
+    try {
+      const out = (await agent.call('scene.autopaint', { projectId }, PAINT_CTX)) as {
+        applied: number;
+        groups: number;
+      };
+      setBusy(false, '');
+      resultEl.innerHTML = `<div class="banner banner-info">✅ Painted <b>${out.applied}</b> parts across <b>${out.groups}</b> models. Undo reverts it.</div>`;
+      toast(`Auto-painted ${out.applied} parts`, 'success');
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  (body.querySelector('#aipaint-tex') as HTMLButtonElement).onclick = async () => {
+    const size = Number((body.querySelector('#aipaint-size') as HTMLSelectElement).value);
+    const maxTextures = Number((body.querySelector('#aipaint-max') as HTMLSelectElement).value);
+    setBusy(true, 'painting + generating textures (can take minutes on the free tier)…');
+    try {
+      const out = (await agent.call('scene.autotexture', { projectId, size, maxTextures }, PAINT_CTX)) as {
+        groups: string[];
+        textures: { role: string; provider: string; seed: number }[];
+      };
+      setBusy(false, '');
+      resultEl.innerHTML = `
+        <div class="banner banner-info">✅ Textured <b>${out.textures.length}</b> part roles (${out.textures.map((t) => escapeHtml(t.role)).join(', ') || '—'}) via ${escapeHtml(out.textures[0]?.provider ?? 'AI')}.</div>`;
+      toast(`Auto-textured ${out.textures.length} roles`, 'success');
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  (body.querySelector('#aipaint-tidy') as HTMLButtonElement).onclick = async () => {
+    setBusy(true, 'tidying…');
+    try {
+      const out = (await agent.call('scene.tidy', { projectId }, PAINT_CTX)) as {
+        arranged: number;
+        cols: number;
+      };
+      setBusy(false, '');
+      resultEl.innerHTML = `<div class="banner banner-info">✅ Arranged <b>${out.arranged}</b> models in ${out.cols} columns. Undo reverts it.</div>`;
+      toast('Scene tidied', 'success');
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  // Analyze immediately so the user sees what the AI sees.
+  (body.querySelector('#aipaint-analyze') as HTMLButtonElement).click();
 }
 
 // =====================================================================

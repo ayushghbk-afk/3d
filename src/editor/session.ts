@@ -541,6 +541,44 @@ export class EditorSession {
     this.sync.broadcastOp('update', o);
   }
 
+  /** Single-undo-step bulk paint used by AI auto-paint (dedupes materials). */
+  applyPaint(
+    items: { objectId: string; materialName: string; patch: Partial<MaterialData> }[],
+  ): { objectId: string; materialId: string }[] {
+    if (!items.length) return [];
+    this.history.checkpoint(this.doc, 'AI auto-paint');
+    const byKey = new Map<string, MaterialData>();
+    const applied: { objectId: string; materialId: string }[] = [];
+    for (const it of items) {
+      const key = JSON.stringify(it.patch);
+      let mat = byKey.get(key);
+      if (!mat) {
+        mat = defaultMaterial(it.materialName.slice(0, 60));
+        Object.assign(mat, it.patch, { updatedAt: nowIso() });
+        this.doc.materials.push(mat);
+        byKey.set(key, mat);
+        this.sync.broadcastMaterial(mat);
+      }
+      const o = this.doc.objects.find((x) => x.id === it.objectId);
+      if (o && this.canEditObject(it.objectId)) {
+        o.materialId = mat.id;
+        o.version++;
+        this.sync.broadcastOp('update', o);
+      }
+      applied.push({ objectId: it.objectId, materialId: mat.id });
+    }
+    normalizeDoc(this.doc);
+    this.viewport.syncMaterials(this.doc.materials);
+    for (const o of this.doc.objects) this.viewport.updateObject(o);
+    this.markDirty('material');
+    return applied;
+  }
+
+  /** Public undo checkpoint for bulk agent operations. */
+  checkpoint(label: string): void {
+    this.history.checkpoint(this.doc, label);
+  }
+
   // ---------- GLB assets ----------
   async importGlbFile(file: File): Promise<void> {
     const buf = await file.arrayBuffer();

@@ -3,6 +3,8 @@ import { IDBFactory } from 'fake-indexeddb';
 import { AgentAPI, AgentError } from '../../src/ai/agent-api.js';
 import { aiSettings, createAgentToken, defaultSettings, updateAiSettings } from '../../src/ai/settings.js';
 import { localDb } from '../../src/lib/indexeddb.js';
+import { createProjectDoc, defaultMaterial, defaultObject } from '../../src/state/models.js';
+import type { AgentSessionLike } from '../../src/ai/types.js';
 
 let api: AgentAPI;
 let token: string;
@@ -367,5 +369,153 @@ describe('generation (mocked network)', () => {
     const out = (await call('ai.ask', { projectId, question: 'summarize' })) as { answer: string; projectId: string };
     expect(out.answer).toContain('0 objects');
     expect(out.projectId).toBe(projectId);
+  });
+});
+
+describe('scene.* (AI understanding + full scene control)', () => {
+  function chairDoc() {
+    const doc = createProjectDoc('Paint Me', 'solo', 'guest');
+    const chair = defaultObject('group', 'Wooden chair');
+    doc.objects.push(chair);
+    for (const n of ['Seat', 'Backrest', 'Leg front', 'Leg back']) {
+      const p = defaultObject('cube', n);
+      p.parentId = chair.id;
+      doc.objects.push(p);
+    }
+    doc.objects.push(defaultObject('cube', 'Mystery blade'));
+    return doc;
+  }
+
+  function fakeLive(doc: ReturnType<typeof chairDoc>) {
+    const byId = (id: string) => doc.objects.find((o) => o.id === id);
+    return {
+      doc,
+      applyPaint: vi.fn((items: { objectId: string; materialName: string; patch: Record<string, unknown> }[]) =>
+        items.map((it) => {
+          const m = defaultMaterial(it.materialName);
+          Object.assign(m, it.patch);
+          doc.materials.push(m);
+          const o = byId(it.objectId);
+          if (o) o.materialId = m.id;
+          return { objectId: it.objectId, materialId: m.id };
+        }),
+      ),
+      checkpoint: vi.fn(),
+      setTransform: vi.fn((id: string, pos?: { x?: number; z?: number }) => {
+        const o = byId(id);
+        if (o && pos) o.position = { ...o.position, ...pos };
+      }),
+      markDirty: vi.fn(),
+      addMaterial: vi.fn(() => {
+        const m = defaultMaterial('M');
+        doc.materials.push(m);
+        return m;
+      }),
+      updateMaterial: vi.fn((id: string, patch: Record<string, unknown>) => {
+        Object.assign(doc.materials.find((m) => m.id === id) ?? {}, patch);
+      }),
+      assignMaterial: vi.fn((objectId: string, materialId: string | null) => {
+        const o = byId(objectId);
+        if (o) o.materialId = materialId;
+      }),
+      uploadTexture: vi.fn(async () => undefined),
+    };
+  }
+
+  it('lists scene.* in capabilities with read/write/generate scopes', async () => {
+    const caps = (await api.authorizedCall('agent.capabilities', {}, 'page', null)) as {
+      methods: { name: string; scope: string }[];
+    };
+    const byName = Object.fromEntries(caps.methods.map((m) => [m.name, m.scope]));
+    expect(byName).toMatchObject({
+      'scene.analyze': 'read',
+      'scene.autopaint': 'write',
+      'scene.autotexture': 'generate',
+      'scene.tidy': 'write',
+    });
+  });
+
+  it('analyzes + paints + tidies headless with persistence', async () => {
+    const doc = chairDoc();
+    await localDb.saveProject(doc);
+    const analysis = (await call('scene.analyze', { projectId: doc.id })) as {
+      mode: string; summary: string; groups: { label: string }[];
+    };
+    expect(analysis.mode).toBe('headless');
+    expect(analysis.groups.map((g) => g.label).sort()).toEqual(['chair', 'sword']);
+    expect(analysis.summary).toContain('chair');
+
+    const painted = (await call('scene.autopaint', { projectId: doc.id })) as {
+      mode: string; applied: number; groups: number;
+      plan: { role: string; color: string }[];
+    };
+    expect(painted.mode).toBe('headless');
+    expect(painted.applied).toBe(5);
+    expect(painted.groups).toBe(2);
+    const reloaded = await localDb.getProject(doc.id);
+    expect(reloaded?.materials.length).toBeGreaterThanOrEqual(2);
+    expect(reloaded?.objects.find((o) => o.name === 'Seat')?.materialId).not.toBeNull();
+
+    const tidied = (await call('scene.tidy', { projectId: doc.id, spacing: 4 })) as {
+      arranged: number; cols: number; spacing: number;
+    };
+    expect(tidied).toMatchObject({ arranged: 2, cols: 2, spacing: 4 });
+    const moved = await localDb.getProject(doc.id);
+    const xs = moved?.objects.filter((o) => !o.parentId).map((o) => o.position.x).sort();
+    expect(xs).toEqual([0, 4]);
+  });
+
+  it('scopes autopaint to groupIds', async () => {
+    const doc = chairDoc();
+    await localDb.saveProject(doc);
+    const chairId = doc.objects.find((o) => o.name === 'Wooden chair')?.id;
+    const out = (await call('scene.autopaint', { projectId: doc.id, groupIds: [chairId] })) as {
+      applied: number; groups: number;
+    };
+    expect(out).toMatchObject({ applied: 4, groups: 1 });
+  });
+
+  it('paints live through one session.applyPaint call (single undo step)', async () => {
+    const doc = chairDoc();
+    const live = fakeLive(doc);
+    const liveApi = new AgentAPI(() => live as unknown as AgentSessionLike);
+    const out = (await liveApi.authorizedCall('scene.autopaint', {}, 'page', token)) as {
+      mode: string; applied: number;
+    };
+    expect(out.mode).toBe('live');
+    expect(out.applied).toBe(5);
+    expect(live.applyPaint).toHaveBeenCalledTimes(1);
+    expect(live.applyPaint.mock.calls[0][0]).toHaveLength(5);
+    const analysis = (await liveApi.authorizedCall('scene.analyze', {}, 'page', token)) as { mode: string };
+    expect(analysis.mode).toBe('live');
+  });
+
+  it('tidies live via checkpoint + one setTransform per root', async () => {
+    const doc = chairDoc();
+    const live = fakeLive(doc);
+    const liveApi = new AgentAPI(() => live as unknown as AgentSessionLike);
+    const out = (await liveApi.authorizedCall('scene.tidy', {}, 'page', token)) as { arranged: number };
+    expect(out.arranged).toBe(2);
+    expect(live.checkpoint).toHaveBeenCalledTimes(1);
+    expect(live.setTransform).toHaveBeenCalledTimes(2);
+  });
+
+  it('autotextures live: paint first, then one AI texture per role', async () => {
+    const doc = chairDoc();
+    const live = fakeLive(doc);
+    const liveApi = new AgentAPI(() => live as unknown as AgentSessionLike);
+    const png = new Uint8Array(2048);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(png as unknown as BodyInit, { status: 200, headers: { 'content-type': 'image/png' } })),
+    );
+    const out = (await liveApi.authorizedCall('scene.autotexture', { maxTextures: 1 }, 'page', token)) as {
+      mode: string; painted: number; textured: { role: string; provider: string }[];
+    };
+    expect(out.mode).toBe('live');
+    expect(out.painted).toBe(5);
+    expect(out.textured).toHaveLength(1);
+    expect(out.textured[0].provider).toBe('pollinations');
+    expect(live.uploadTexture).toHaveBeenCalledTimes(1);
   });
 });

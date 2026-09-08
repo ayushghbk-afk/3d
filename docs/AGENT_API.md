@@ -180,6 +180,10 @@ Omit `projectId` to target the open project (live), or pass one from
 | `clip.add` | write | `{projectId?, name?}` |
 | `keyframe.add` | write | `{projectId?, objectId, property?, frame?, value?, clipId?}` |
 | `keyframe.delete` | write | `{projectId?, objectId, property?, frame}` |
+| `scene.analyze` | read | `{projectId?}` → per-group model identification (chair, car, …) + part roles — **agents start here for styling** |
+| `scene.autopaint` | write | `{projectId?, groupIds?}` → coherent colors per part role; live = one Undo step |
+| `scene.autotexture` | generate | `{projectId?, groupIds?, size?, maxTextures?}` → autopaint + one AI texture per part role (slow, free tier ≈ 1 img/15s) |
+| `scene.tidy` | write | `{projectId?, spacing?}` → arrange top-level models in a grid |
 | `history.undo` / `history.redo` | write | live editor only |
 | `save.now` | write | `{projectId?}` → local + cloud (when signed in) |
 | `ai.ask` | generate | `{projectId?, question}` → grounded answer |
@@ -195,8 +199,10 @@ surface the raw provider error instead.
 
 1. `project.list` → pick a project (or `project.create`).
 2. `project.context` (+ `project.scene` for the full graph).
-3. Make changes (`object.*`, `material.*`, `texture/model.generate`, …).
-4. `save.now`.
+3. For styling an existing scene: `scene.analyze` → `scene.autopaint` (or
+   `scene.autotexture` for AI surfaces) → `scene.tidy` to lay models out.
+4. Make changes (`object.*`, `material.*`, `texture/model.generate`, …).
+5. `save.now`.
 5. On any error, read `error.code`/`message` — validation errors name the
    exact parameter.
 

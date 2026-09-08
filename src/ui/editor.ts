@@ -9,6 +9,8 @@ import { buildOutliner } from './outliner.js';
 import { buildInspector } from './inspector.js';
 import { buildTimeline } from './timeline.js';
 import { openModal, closeModal } from './modals.js';
+import { attachDocking } from './docking.js';
+import { closeFloatWin } from './floatwin.js';
 import { openGithubImport, openGithubExport, openMembersModal, openVersionsModal, openShortcutsModal } from './panels.js';
 import { setEditorSession } from '../ai/index.js';
 
@@ -49,6 +51,8 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     } else if (e.key === ' ') {
       e.preventDefault();
       togglePlay();
+    } else if (e.key.toLowerCase() === 'a' && !document.getElementById('modal-root')?.hasChildNodes()) {
+      openAi(session);
     } else if (e.key === '?') {
       openShortcutsModal();
     }
@@ -64,7 +68,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
         <span class="spacer"></span>
         <span id="tb-presence" class="presence"></span>
         <button id="tb-members" class="btn btn-sm">👥</button>
-        <button id="tb-ai" class="btn btn-sm" title="AI Studio — generate 3D, textures, Agent API">✨ AI</button>
+        <button id="tb-ai" class="btn btn-sm" title="AI Studio — toggle (A). Drag, resize, collapse.">✨ AI</button>
         <button id="tb-github" class="btn btn-sm">⬢ GitHub</button>
         <button id="tb-menu" class="btn btn-sm">☰</button>
       </header>
@@ -217,6 +221,8 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     unsubs.push(buildOutliner(s, root.querySelector('#outliner') as HTMLElement));
     unsubs.push(buildInspector(s, root.querySelector('#inspector') as HTMLElement));
     unsubs.push(buildTimeline(s, root.querySelector('#timeline') as HTMLElement, togglePlay));
+    // resizable + collapsible panels (outliner / inspector / timeline), layout persisted
+    unsubs.push(attachDocking(root));
 
     (root.querySelector('#tb-back') as HTMLButtonElement).onclick = async () => {
       await s.forceSave();
@@ -250,6 +256,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
       } catch { /* noop */ }
     });
     setEditorSession(null);
+    closeFloatWin('ai-studio');
     session?.dispose();
     session = null;
     root.innerHTML = '';
@@ -382,7 +389,7 @@ function openEditorMenu(s: EditorSession, togglePlay: () => void): void {
   body.className = 'menu-list';
   const items: { label: string; fn: () => void }[] = [
     { label: '💾 Save now', fn: () => void s.forceSave().then(() => toast('Saved', 'success')) },
-    { label: '✨ AI Studio (3D, textures, agents)', fn: () => openAi(s) },
+    { label: '✨ AI Studio — toggle (A)', fn: () => openAi(s) },
     { label: '📥 Import GLB', fn: () => void importGlb(s) },
     { label: '📤 Export GLB', fn: () => void s.exportGlb() },
     { label: '⬢ GitHub import / export', fn: () => openGithubMenu(s) },
@@ -410,7 +417,9 @@ function openEditorMenu(s: EditorSession, togglePlay: () => void): void {
 }
 
 function openAi(s: EditorSession): void {
-  void import('./ai-panel.js').then(({ openAiPanel }) => openAiPanel(s));
+  // Floating ✨ AI Studio: toggleable — pressing ✨ AI / A again hides it to
+  // reveal the 3D scene; it also collapses and remembers its position/size.
+  void import('./ai-panel.js').then(({ toggleAiPanel }) => toggleAiPanel(s));
 }
 
 function openGithubMenu(s: EditorSession): void {

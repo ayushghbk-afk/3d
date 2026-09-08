@@ -77,6 +77,8 @@ Editor → **✨ AI** opens AI Studio:
   TripoSR fallback), with an offline primitive mockup when AI is unreachable.
 - **🎨 Texture** — free text-to-texture (Pollinations Flux, no key) applied to
   any material.
+- **🖌️ Paint** — the AI looks at your groups to identify each model and its
+  parts, then auto-paints, AI-textures or tidies the whole scene at once.
 - **💬 Ask** — project-grounded Q&A over the live scene summary.
 - **🤖 Agent API** — let an AI agent list projects and make changes (objects,
   materials, textures, models, keyframes) via in-page JS, `postMessage`,
@@ -85,6 +87,16 @@ Editor → **✨ AI** opens AI Studio:
   OpenAI-compatible endpoint + key. Keys never leave the browser.
 
 **[Full spec: connection methods, auth, method reference, custom APIs →](docs/AGENT_API.md)**
+
+## Movable interface
+
+- **✨ AI Studio** is a floating window: drag it by the title bar, resize it by
+  the corner, collapse it to a bar, or toggle it with the **✨ AI** button (or
+  the `A` key) to reveal the 3D scene. Its position and size are remembered.
+- **Outliner, inspector and timeline** resize by dragging their edges and
+  collapse via the arrow button or double-click; the layout is remembered.
+- **Every dialog** (menus, GitHub, members, shortcuts…) drags by its title bar
+  and resizes by its corner.
 
 ## Scripts
 

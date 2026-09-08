@@ -101,4 +101,8 @@ export interface AgentSessionLike {
   redo(): void;
   forceSave(): Promise<void>;
   markDirty(kind: string): void;
+  checkpoint(label: string): void;
+  applyPaint(
+    items: { objectId: string; materialName: string; patch: Partial<import('../state/models.js').MaterialData> }[],
+  ): { objectId: string; materialId: string }[];
 }

@@ -16,6 +16,7 @@ import { localDb } from '../lib/indexeddb.js';
 import { uid, nowIso } from '../lib/utils.js';
 import { toAiContext, toProjectJson, toSceneJson } from '../editor/serialization.js';
 import { deleteKeyframeAt, setKeyframe, trackValueOf } from '../editor/animation.js';
+import { analyzeScene, planPaint, planTidy } from './scene-iq.js';
 import { aiSettings, logActivity, verifyAgentToken } from './settings.js';
 import { generateImageSmart, generateMeshSmart, getChatProvider } from './factory.js';
 import { texturePrompt } from './pollinations.js';
@@ -713,6 +714,149 @@ export class AgentAPI {
   }
 
   // ===================================================================
+  // methods: scene.* (AI understanding + full scene control)
+  // ===================================================================
+
+  private async m_scene_analyze(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const analysis = analyzeScene(t.doc);
+    return {
+      mode: t.mode,
+      projectId: t.doc.id,
+      summary: analysis.summary,
+      groups: analysis.groups,
+      paintable: t.doc.objects.filter((o) => o.type !== 'light').length,
+    };
+  }
+
+  private async m_scene_autopaint(p: Params, ctx: AgentContext): Promise<unknown> {
+    void ctx;
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const groupIds = Array.isArray(p.groupIds)
+      ? (p.groupIds as unknown[]).filter((g): g is string => typeof g === 'string').slice(0, 50)
+      : undefined;
+    const plan = planPaint(t.doc, groupIds);
+    if (!plan.length) {
+      return { mode: t.mode, projectId: t.doc.id, applied: 0, groups: 0, note: 'No paintable parts with a recognized role.' };
+    }
+    if (t.mode === 'live' && t.session) {
+      const applied = t.session.applyPaint(plan.map((item) => ({
+        objectId: item.objectId,
+        materialName: item.materialName,
+        patch: item.patch,
+      })));
+      return {
+        mode: t.mode,
+        projectId: t.doc.id,
+        applied: applied.length,
+        groups: new Set(plan.map((i) => i.groupLabel)).size,
+        plan: plan.map((i) => ({ objectId: i.objectId, objectName: i.objectName, role: i.role, color: i.patch.baseColor })),
+      };
+    }
+    const byKey = new Map<string, MaterialData>();
+    for (const item of plan) {
+      const key = JSON.stringify(item.patch);
+      let mat = byKey.get(key);
+      if (!mat) {
+        mat = defaultMaterial(item.materialName.slice(0, 60));
+        Object.assign(mat, item.patch, { updatedAt: nowIso() });
+        t.doc.materials.push(mat);
+        byKey.set(key, mat);
+      }
+      const o = t.doc.objects.find((x) => x.id === item.objectId);
+      if (o) {
+        o.materialId = mat.id;
+        o.version++;
+      }
+    }
+    touchDoc(t.doc);
+    await this.persist(t, 'material');
+    return {
+      mode: t.mode,
+      projectId: t.doc.id,
+      applied: plan.length,
+      groups: new Set(plan.map((i) => i.groupLabel)).size,
+      plan: plan.map((i) => ({ objectId: i.objectId, objectName: i.objectName, role: i.role, color: i.patch.baseColor })),
+    };
+  }
+
+  private async m_scene_autotexture(p: Params, ctx: AgentContext): Promise<unknown> {
+    const projectId = optStr(p, 'projectId', 120) || undefined;
+    const t = await this.resolve(projectId);
+    const groupIds = Array.isArray(p.groupIds)
+      ? (p.groupIds as unknown[]).filter((g): g is string => typeof g === 'string').slice(0, 50)
+      : undefined;
+    const size = p.size === undefined ? 512 : num(p, 'size', true, 64, 1024);
+    const maxTextures = p.maxTextures === undefined ? 4 : num(p, 'maxTextures', true, 1, 8);
+    // Paint first so every role owns a material, then texture each role once.
+    const paint = (await this.m_scene_autopaint({ projectId: t.doc.id, ...(groupIds ? { groupIds } : {}) }, ctx)) as {
+      plan: { objectId: string; role: string }[];
+    };
+    const plan = planPaint(t.doc, groupIds);
+    const seen = new Map<string, { materialId: string; prompt: string; role: string }>();
+    const matOf = new Map<string, string>();
+    if (t.mode === 'live') {
+      for (const item of plan) {
+        const o = t.doc.objects.find((x) => x.id === item.objectId);
+        if (o?.materialId) matOf.set(item.objectId, o.materialId);
+      }
+    } else {
+      const fresh = await localDb.getProject(t.doc.id);
+      for (const item of plan) {
+        const o = fresh?.objects.find((x) => x.id === item.objectId);
+        if (o?.materialId) matOf.set(item.objectId, o.materialId);
+      }
+    }
+    for (const item of plan) {
+      if (!item.texturePrompt || seen.has(item.role)) continue;
+      const materialId = matOf.get(item.objectId);
+      if (!materialId) continue;
+      seen.set(item.role, { materialId, prompt: item.texturePrompt, role: item.role });
+      if (seen.size >= maxTextures) break;
+    }
+    const results: { role: string; materialId: string; provider: string; seed: number }[] = [];
+    for (const entry of seen.values()) {
+      const out = (await this.call('texture.generate', {
+        projectId: t.doc.id,
+        prompt: entry.prompt,
+        materialId: entry.materialId,
+        size,
+        seamless: true,
+      }, ctx)) as { provider: string; seed: number };
+      results.push({ role: entry.role, materialId: entry.materialId, provider: out.provider, seed: out.seed });
+    }
+    return {
+      mode: t.mode,
+      projectId: t.doc.id,
+      painted: (paint.plan ?? []).length,
+      textured: results,
+      note: results.length ? undefined : 'No roles with texture prompts (colors were still applied).',
+    };
+  }
+
+  private async m_scene_tidy(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const spacing = p.spacing === undefined ? 3.5 : num(p, 'spacing', true, 1, 50);
+    const plan = planTidy(t.doc, spacing);
+    if (t.mode === 'live' && t.session) {
+      t.session.checkpoint('Tidy scene');
+      for (const item of plan.items) {
+        t.session.setTransform(item.objectId, { x: item.x, z: item.z });
+      }
+    } else {
+      for (const item of plan.items) {
+        const o = t.doc.objects.find((x) => x.id === item.objectId);
+        if (!o) continue;
+        o.position = { ...o.position, x: item.x, z: item.z };
+        o.version++;
+      }
+      touchDoc(t.doc);
+      await this.persist(t, 'edit');
+    }
+    return { mode: t.mode, projectId: t.doc.id, arranged: plan.items.length, cols: plan.cols, spacing: plan.spacing };
+  }
+
+  // ===================================================================
   // methods: history / save / ai
   // ===================================================================
 
@@ -896,6 +1040,7 @@ export type AgentMethod =
   | 'material.list' | 'material.add' | 'material.update'
   | 'asset.list' | 'asset.import'
   | 'clip.list' | 'clip.add' | 'keyframe.add' | 'keyframe.delete'
+  | 'scene.analyze' | 'scene.autopaint' | 'scene.autotexture' | 'scene.tidy'
   | 'history.undo' | 'history.redo' | 'save.now'
   | 'ai.ask' | 'image.generate' | 'texture.generate' | 'model.generate';
 
@@ -924,6 +1069,10 @@ const METHOD_SCOPES: Record<AgentMethod, AgentScope | 'none'> = {
   'clip.add': 'write',
   'keyframe.add': 'write',
   'keyframe.delete': 'write',
+  'scene.analyze': 'read',
+  'scene.autopaint': 'write',
+  'scene.autotexture': 'generate',
+  'scene.tidy': 'write',
   'history.undo': 'write',
   'history.redo': 'write',
   'save.now': 'write',
@@ -958,6 +1107,10 @@ const METHOD_DOCS: Record<AgentMethod, string> = {
   'clip.add': 'Add + activate a clip. Params: {projectId?, name?}.',
   'keyframe.add': 'Add keyframe. Params: {projectId?, objectId, property?, frame?, value?, clipId?}.',
   'keyframe.delete': 'Delete keyframe. Params: {projectId?, objectId, property?, frame}.',
+  'scene.analyze': 'Identify models by group (chair, car…) + part roles. Params: {projectId?}.',
+  'scene.autopaint': 'Apply coherent colors per part role. Params: {projectId?, groupIds?}.',
+  'scene.autotexture': 'Auto-paint + AI texture per role (slow). Params: {projectId?, groupIds?, size?, maxTextures?}.',
+  'scene.tidy': 'Arrange top-level models in a grid. Params: {projectId?, spacing?}.',
   'history.undo': 'Undo (open editor only).',
   'history.redo': 'Redo (open editor only).',
   'save.now': 'Save now (local + cloud when signed in). Params: {projectId?}.',

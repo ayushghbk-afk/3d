@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
-import { createProjectDoc } from '../../src/state/models.js';
+import { createProjectDoc, defaultObject } from '../../src/state/models.js';
 import { updateAiSettings, defaultSettings, aiSettings } from '../../src/ai/settings.js';
 import { openAiPanel } from '../../src/ui/ai-panel.js';
+import { setEditorSession } from '../../src/ai/index.js';
 import type { EditorSession } from '../../src/editor/session.js';
+import type { AgentSessionLike } from '../../src/ai/types.js';
 
 function fakeSession() {
   const doc = createProjectDoc('Panel Test', 'solo', 'guest');
@@ -95,6 +97,42 @@ describe('AI panel', () => {
     expect(aiSettings.get().agent.tokens).toHaveLength(1);
     (body.querySelector('[data-revoke]') as HTMLButtonElement).click();
     expect(aiSettings.get().agent.tokens).toHaveLength(0);
+  });
+
+  it('paint tab analyzes groups and auto-paints through the agent', async () => {
+    const doc = createProjectDoc('Paint UI', 'solo', 'guest');
+    const g = defaultObject('group', 'Wooden chair');
+    doc.objects.push(g);
+    for (const n of ['Seat', 'Backrest', 'Leg front', 'Leg back']) {
+      const p = defaultObject('cube', n);
+      p.parentId = g.id;
+      doc.objects.push(p);
+    }
+    const session = {
+      doc,
+      applyPaint: vi.fn((items: { objectId: string }[]) =>
+        items.map((it) => ({ objectId: it.objectId, materialId: `mat-${it.objectId}` })),
+      ),
+    } as unknown as EditorSession;
+    setEditorSession(session as unknown as AgentSessionLike);
+    try {
+      openAiPanel(session, 'paint');
+      // Floating window chrome, not a modal.
+      await vi.waitFor(() => expect(document.querySelector('#float-root .floatwin')).not.toBeNull());
+      expect(document.querySelector('.floatwin-title')?.textContent).toBe('✨ AI Studio');
+      // Auto-analyze shows what the AI sees: chair + part roles.
+      await vi.waitFor(() => expect(document.querySelector('.ai-group-card')).not.toBeNull());
+      expect(tabBody().textContent).toContain('chair');
+      expect(tabBody().textContent).toContain('legs');
+      (tabBody().querySelector('#aipaint-go') as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(session.applyPaint).toHaveBeenCalledTimes(1));
+      expect(tabBody().querySelector('#aipaint-result')?.textContent).toContain('Painted');
+      // Per-group paint button scopes to that group.
+      (tabBody().querySelector('[data-paint-group]') as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(session.applyPaint).toHaveBeenCalledTimes(2));
+    } finally {
+      setEditorSession(null);
+    }
   });
 
   it('saves custom API settings', async () => {

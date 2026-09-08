@@ -47,6 +47,7 @@ export function openModal(opts: { title: string; body: HTMLElement | string; act
   overlay.addEventListener('pointerdown', (e) => {
     if (e.target === overlay) closeModal();
   });
+  makeDialogMovable(modal, titleRow);
   root.innerHTML = '';
   root.appendChild(overlay);
   const first = modal.querySelector('input,button.btn-primary') as HTMLElement | null;
@@ -57,6 +58,79 @@ export function openModal(opts: { title: string; body: HTMLElement | string; act
 export function closeModal(): void {
   const root = document.getElementById('modal-root') as HTMLElement;
   root.innerHTML = '';
+}
+
+/** Every dialog can be dragged by its title bar and resized by its corner. */
+function makeDialogMovable(modal: HTMLElement, titleRow: HTMLElement): void {
+  titleRow.classList.add('modal-drag');
+  const grip = document.createElement('div');
+  grip.className = 'modal-resize';
+  grip.title = 'Resize';
+  modal.appendChild(grip);
+
+  const fixPosition = (): void => {
+    if (modal.dataset.moved) return;
+    modal.dataset.moved = '1';
+    const r = modal.getBoundingClientRect();
+    modal.style.position = 'fixed';
+    modal.style.left = `${r.left}px`;
+    modal.style.top = `${r.top}px`;
+    modal.style.margin = '0';
+    modal.style.width = `${r.width}px`;
+  };
+  const clampMove = (x: number, y: number): { x: number; y: number } => ({
+    x: Math.max(60 - modal.offsetWidth, Math.min(window.innerWidth - 60, x)),
+    y: Math.max(8, Math.min(window.innerHeight - 60, y)),
+  });
+
+  titleRow.addEventListener('pointerdown', (e) => {
+    if ((e.target as HTMLElement).closest('button, input, select, textarea, a')) return;
+    e.preventDefault();
+    fixPosition();
+    modal.classList.add('modal-dragging');
+    const r = modal.getBoundingClientRect();
+    const dx = e.clientX - r.left;
+    const dy = e.clientY - r.top;
+    const move = (m: PointerEvent): void => {
+      const p = clampMove(m.clientX - dx, m.clientY - dy);
+      modal.style.left = `${p.x}px`;
+      modal.style.top = `${p.y}px`;
+    };
+    const up = (): void => {
+      modal.classList.remove('modal-dragging');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  });
+
+  grip.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fixPosition();
+    const startW = modal.offsetWidth;
+    const startH = modal.offsetHeight;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const move = (m: PointerEvent): void => {
+      const w = Math.max(300, Math.min(window.innerWidth - 16, startW + (m.clientX - startX)));
+      const h = Math.max(200, Math.min(window.innerHeight - 16, startH + (m.clientY - startY)));
+      modal.style.width = `${w}px`;
+      modal.style.height = `${h}px`;
+      modal.style.maxWidth = 'none';
+    };
+    const up = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  });
 }
 
 export function confirmModal(title: string, message: string, confirmLabel: string, onConfirm: () => void | Promise<void>): void {
