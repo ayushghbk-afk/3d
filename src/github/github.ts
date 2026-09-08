@@ -221,6 +221,7 @@ export async function importStudioProject(
         doc.clips = frag.clips;
         doc.activeClipId = frag.clips[0].id;
       }
+      if (frag.settings) doc.settings = frag.settings;
     }
   }
   // fetch referenced model blobs (match by filename)
@@ -242,7 +243,7 @@ export async function importStudioProject(
       const buf = blobs.get(hit) as ArrayBuffer;
       doc.assets.push({
         id: assetId, name: hit.split('/').pop() ?? 'model.glb', kind: 'model',
-        mime: 'model/gltf-binary', size: buf.byteLength, storagePath: null, local: true, createdAt: new Date().toISOString(),
+        mime: 'model/gltf-binary', size: buf.byteLength, storagePath: null, local: true, thumb: null, createdAt: new Date().toISOString(),
       });
       blobs.set(`asset:${assetId}`, buf);
       o.assetId = assetId;

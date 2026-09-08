@@ -97,6 +97,9 @@ export interface Material {
   emissive_intensity: number;
   opacity: number;
   transparent: boolean;
+  side: string;
+  flat_shading: boolean;
+  map_asset_id: string | null;
   node_graph: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;

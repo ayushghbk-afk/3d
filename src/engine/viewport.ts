@@ -35,6 +35,7 @@ export class Viewport {
   private raf = 0;
   private resizeObs: ResizeObserver;
   private shading: ShadingMode = 'material';
+  private baseEnv = 1;
   private downPos: { x: number; y: number; t: number } | null = null;
   private disposed = false;
 
@@ -135,10 +136,12 @@ export class Viewport {
     this.resize();
   }
 
-  setShading(mode: ShadingMode): void {
+  setShading(mode: ShadingMode, baseEnv = 1): void {
     this.shading = mode;
+    this.baseEnv = baseEnv;
+    const env = mode === 'material' ? baseEnv : baseEnv * 0.35;
     this.materials.setWireframe(mode === 'wireframe');
-    this.materials.setEnvIntensity(mode === 'material' ? 1 : 0.35);
+    this.materials.setEnvIntensity(env);
     // imported materials (not in manager): traverse unique set
     const seen = new Set<THREE.Material>();
     this.scene.traverse((o) => {
@@ -150,7 +153,7 @@ export class Viewport {
         seen.add(m);
         const std = m as THREE.MeshStandardMaterial;
         if ('wireframe' in std) std.wireframe = mode === 'wireframe';
-        if ('envMapIntensity' in std) std.envMapIntensity = mode === 'material' ? 1 : 0.35;
+        if ('envMapIntensity' in std) std.envMapIntensity = env;
       });
     });
   }
@@ -166,19 +169,13 @@ export class Viewport {
 
   syncMaterials(all: MaterialData[]): void {
     this.materials.sync(all);
-    this.setShading(this.shading);
+    this.setShading(this.shading, this.baseEnv);
   }
 
   private buildMesh(data: SceneObjectData): THREE.Object3D {
     if (data.type === 'group') return new THREE.Group();
     if (data.type === 'light') {
-      const l = new THREE.PointLight(0xffffff, 8, 20);
-      const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(0.08, 12, 8),
-        new THREE.MeshBasicMaterial({ color: 0xffdd88 }),
-      );
-      l.add(marker);
-      return l;
+      return this.buildLight(data);
     }
     if (data.type === 'imported') return new THREE.Group(); // content attached async
     const geo = makePrimitiveGeometry(data.primitive?.kind ?? 'cube', data.primitive?.params ?? {});
@@ -187,6 +184,65 @@ export class Viewport {
     mesh.castShadow = !this.caps.lowPower;
     mesh.receiveShadow = true;
     return mesh;
+  }
+
+  private buildLight(data: SceneObjectData): THREE.Object3D {
+    const l = data.light ?? { kind: 'point', color: '#ffffff', intensity: 10, distance: 20, angle: 0.6, penumbra: 0.4, castShadow: false } as const;
+    const group = new THREE.Group();
+    let light: THREE.Light;
+    switch (l.kind) {
+      case 'directional':
+        light = new THREE.DirectionalLight(l.color, l.intensity);
+        break;
+      case 'spot':
+        light = new THREE.SpotLight(l.color, l.intensity, l.distance || 0, l.angle, l.penumbra);
+        break;
+      case 'ambient':
+        light = new THREE.AmbientLight(l.color, l.intensity);
+        break;
+      case 'hemisphere':
+        light = new THREE.HemisphereLight(l.color, 0x1a1d24, l.intensity);
+        break;
+      case 'point':
+      default:
+        light = new THREE.PointLight(l.color, l.intensity, l.distance || 0);
+        break;
+    }
+    // aimable lights point down local -Z so the rotate gizmo aims them
+    if (light instanceof THREE.DirectionalLight || light instanceof THREE.SpotLight) {
+      light.target.position.set(0, 0, -1);
+      group.add(light.target);
+      if (l.castShadow && !this.caps.lowPower) {
+        light.castShadow = true;
+        light.shadow.mapSize.set(1024, 1024);
+      }
+    } else if (light instanceof THREE.PointLight && l.castShadow && !this.caps.lowPower) {
+      light.castShadow = true;
+      light.shadow.mapSize.set(512, 512);
+    }
+    group.add(light);
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 12, 8),
+      new THREE.MeshBasicMaterial({ color: l.color }),
+    );
+    marker.name = '__marker';
+    group.add(marker);
+    return group;
+  }
+
+  /** Global shadow toggle (project setting). */
+  setShadowsEnabled(v: boolean): void {
+    const enabled = v && !this.caps.lowPower;
+    this.renderer.shadowMap.enabled = enabled;
+    this.dirLight.castShadow = enabled;
+    this.scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      const mats = mesh.isMesh ? (Array.isArray(mesh.material) ? mesh.material : [mesh.material]) : [];
+      mats.forEach((m) => {
+        m.needsUpdate = true;
+      });
+    });
+    this.materials.touchAll();
   }
 
   addObject(data: SceneObjectData): THREE.Object3D {
@@ -214,12 +270,18 @@ export class Viewport {
         mesh.receiveShadow = true;
       }
     });
-    this.setShading(this.shading);
+    this.setShading(this.shading, this.baseEnv);
   }
 
   updateObject(data: SceneObjectData): void {
     const obj = this.objects.get(data.id);
     if (!obj) {
+      this.addObject(data);
+      return;
+    }
+    if (data.type === 'light') {
+      // light class/params can't be patched in place — rebuild (addObject reparents)
+      this.removeObject(data.id);
       this.addObject(data);
       return;
     }

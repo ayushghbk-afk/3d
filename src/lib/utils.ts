@@ -89,3 +89,17 @@ export function escapeHtml(s: string): string {
 export function isTouchDevice(): boolean {
   return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 }
+
+/** Downscale an image to a small dataURL preview for asset thumbnails. */
+export function makeThumb(bitmap: ImageBitmap, maxSize = 96): string | null {
+  try {
+    const scale = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.floor(bitmap.width * scale));
+    c.height = Math.max(1, Math.floor(bitmap.height * scale));
+    c.getContext('2d')?.drawImage(bitmap, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.75);
+  } catch {
+    return null;
+  }
+}

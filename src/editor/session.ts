@@ -7,15 +7,15 @@ import { Playback, activeClip, setKeyframe, deleteKeyframeAt, samplePose, trackV
 import { SyncEngine } from './sync.js';
 import { Store } from '../state/store.js';
 import {
-  defaultMaterial, defaultObject, defaultClip, createProjectDoc,
-  type AnimTrack, type MaterialData, type ObjectType, type PrimitiveType,
+  defaultMaterial, defaultObject, defaultClip, createProjectDoc, normalizeDoc,
+  type AnimTrack, type LightData, type LightKind, type MaterialData, type ObjectType, type PrimitiveType,
   type ProjectDoc, type ProjectMode, type SceneObjectData, type ShadingMode,
   type TransformMode, type CameraType, type PresenceUser,
 } from '../state/models.js';
 import { localDb } from '../lib/indexeddb.js';
 import { auth } from '../lib/auth.js';
 import { cloudEnabled } from '../lib/supabase.js';
-import { uid, nowIso, debounce, throttle } from '../lib/utils.js';
+import { uid, nowIso, debounce, throttle, makeThumb } from '../lib/utils.js';
 
 export type SaveState = 'saved' | 'saving' | 'local' | 'offline' | 'error';
 
@@ -46,11 +46,13 @@ export class EditorSession {
   });
   rev = new Store<number>(0); // bumped on every doc mutation -> UI refresh
   canEdit = new Store<boolean>(true);
+  autoKey = new Store<boolean>(false); // ⏺ record: transform edits write keyframes
 
   onNotice: ((n: SessionNotice) => void) | null = null;
   onRecovery: ((local: ProjectDoc, cloud: ProjectDoc) => void) | null = null;
 
   private blobs = new Map<string, ArrayBuffer>(); // assetId -> glb bytes (runtime cache)
+  private textures = new Map<string, THREE.Texture>(); // assetId -> gpu texture (owned here)
   private userId = 'guest';
   private userName = 'Guest';
   private disposed = false;
@@ -68,8 +70,10 @@ export class EditorSession {
       this.userName = u.name;
     }
 
+    normalizeDoc(doc);
     viewport.syncMaterials(doc.materials);
     for (const o of doc.objects) viewport.addObject(o);
+    this.applySettings();
 
     this.gizmo = new TransformGizmo(viewport.scene, viewport.camera, viewport.renderer.domElement);
     this.gizmo.onDraggingChanged = (dragging) => {
@@ -79,6 +83,7 @@ export class EditorSession {
         this.broadcastLock(true);
       } else {
         this.markDirty('transform');
+        this.autokeyFromGizmo();
       }
     };
     this.gizmo.onObjectChange = (delta) => {
@@ -123,7 +128,7 @@ export class EditorSession {
       if (id) this.broadcastLock(true);
     });
     this.transformMode.subscribe((m) => this.gizmo.setMode(m));
-    this.shadingMode.subscribe((m) => viewport.setShading(m));
+    this.shadingMode.subscribe((m) => viewport.setShading(m, this.doc.settings?.envIntensity ?? 1));
     this.cameraType.subscribe((t) => {
       viewport.setCameraType(t);
       this.gizmo.setCamera(viewport.camera);
@@ -158,6 +163,7 @@ export class EditorSession {
     for (const o of doc.objects) {
       if (o.type === 'imported' && o.assetId) await session.attachAsset(o);
     }
+    await session.hydrateTextures();
     const clip = activeClip(doc);
     session.anim.set({ playing: false, frame: 0, length: clip?.length ?? 90, fps: clip?.fps ?? 30 });
     await session.sync.start();
@@ -278,8 +284,28 @@ export class EditorSession {
   addGroup(): SceneObjectData {
     return this.addObject('group', 'Group');
   }
-  addLight(): SceneObjectData {
-    return this.addObject('light', 'Light');
+  addLight(kind: LightKind = 'point'): SceneObjectData {
+    const o = this.addObject('light', kind.charAt(0).toUpperCase() + kind.slice(1));
+    o.light = { ...((o.light ?? {}) as LightData), kind } as LightData;
+    // rebuild the three object as the right light class
+    this.viewport.removeObject(o.id);
+    this.viewport.addObject(o);
+    this.select(o.id);
+    this.markDirty('add');
+    this.sync.broadcastOp('update', o);
+    return o;
+  }
+
+  updateLight(id: string, patch: Partial<LightData>): void {
+    const o = this.doc.objects.find((x) => x.id === id);
+    if (!o || o.type !== 'light' || !this.canEditObject(id)) return;
+    o.light = { ...(o.light ?? { kind: 'point', color: '#ffffff', intensity: 10, distance: 20, angle: 0.6, penumbra: 0.4, castShadow: false }), ...patch };
+    o.version++;
+    this.viewport.removeObject(id);
+    this.viewport.addObject(o);
+    if (this.selection.get() === id) this.select(id); // re-attach gizmo
+    this.markDirty('edit');
+    this.sync.broadcastOp('update', o);
   }
 
   private uniqueName(base: string): string {
@@ -395,8 +421,28 @@ export class EditorSession {
     if (scl) o.scale = { ...o.scale, ...scl };
     o.version++;
     this.viewport.updateObject(o);
+    if (this.autoKey.get()) {
+      if (pos) this.keyProp(o, 'position');
+      if (rotDeg) this.keyProp(o, 'rotation');
+      if (scl) this.keyProp(o, 'scale');
+    }
     this.markDirty('transform');
     this.broadcastTransform(o);
+  }
+
+  /** Record-mode helper: key one property of an object at the playhead. */
+  private keyProp(o: SceneObjectData, prop: AnimTrack['property']): void {
+    this.history.checkpoint(this.doc, 'Auto key', 1200);
+    setKeyframe(this.doc, o.id, prop, this.playback.frame, trackValueOf(o, prop));
+  }
+
+  private autokeyFromGizmo(): void {
+    if (!this.autoKey.get()) return;
+    const o = this.selectedObject();
+    if (!o) return;
+    const map = { translate: 'position', rotate: 'rotation', scale: 'scale' } as const;
+    this.keyProp(o, map[this.transformMode.get()]);
+    this.markDirty('animation');
   }
 
   // ---------- remote apply (no history, local-save only to avoid echo) ----------
@@ -440,6 +486,8 @@ export class EditorSession {
     const local = this.doc.materials.find((x) => x.id === m.id);
     if (local) Object.assign(local, m);
     else this.doc.materials.push(m);
+    normalizeDoc(this.doc);
+    if (m.mapAssetId) void this.attachTextureById(m.mapAssetId);
     this.viewport.syncMaterials(this.doc.materials);
     for (const o of this.doc.objects) this.viewport.updateObject(o);
     this.rev.set(this.rev.get() + 1);
@@ -497,7 +545,7 @@ export class EditorSession {
     await localDb.saveBlob(assetId, new Blob([buf], { type: 'model/gltf-binary' }));
     this.doc.assets.push({
       id: assetId, name: filename ?? `${name}.glb`, kind: 'model',
-      mime: 'model/gltf-binary', size: buf.byteLength, storagePath: null, local: true, createdAt: nowIso(),
+      mime: 'model/gltf-binary', size: buf.byteLength, storagePath: null, local: true, thumb: null, createdAt: nowIso(),
     });
     const o = defaultObject('imported', this.uniqueName(name));
     o.assetId = assetId;
@@ -551,6 +599,115 @@ export class EditorSession {
 
   getAssetBytes(assetId: string): ArrayBuffer | null {
     return this.blobs.get(assetId) ?? null;
+  }
+
+  // ---------- textures (base-color maps) ----------
+  async uploadTexture(materialId: string, file: File): Promise<void> {
+    const m = this.doc.materials.find((x) => x.id === materialId);
+    if (!m) return;
+    const buf = await file.arrayBuffer();
+    const blob = new Blob([buf], { type: file.type || 'image/png' });
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(blob);
+    } catch {
+      this.notice('error', 'Could not decode that image');
+      return;
+    }
+    this.history.checkpoint(this.doc, 'Add texture');
+    // drop previous map
+    if (m.mapAssetId) this.dropTexture(m.mapAssetId, materialId);
+    const assetId = uid();
+    await localDb.saveBlob(assetId, blob);
+    const tex = this.textureFromBitmap(bitmap);
+    this.textures.set(assetId, tex);
+    this.doc.assets.push({
+      id: assetId, name: file.name, kind: 'texture', mime: blob.type,
+      size: buf.byteLength, storagePath: null, local: true,
+      thumb: makeThumb(bitmap), createdAt: nowIso(),
+    });
+    m.mapAssetId = assetId;
+    m.updatedAt = nowIso();
+    this.viewport.materials.setMap(materialId, tex, m);
+    for (const o of this.doc.objects) if (o.materialId === materialId) this.viewport.updateObject(o);
+    this.markDirty('material');
+    this.sync.broadcastMaterial(m);
+    const ext = (file.name.split('.').pop() ?? 'png').toLowerCase().slice(0, 4) || 'png';
+    void this.sync.uploadAsset(assetId, file.name, buf, { kind: 'texture', mime: blob.type, ext });
+  }
+
+  removeTexture(materialId: string): void {
+    const m = this.doc.materials.find((x) => x.id === materialId);
+    if (!m || !m.mapAssetId) return;
+    this.history.checkpoint(this.doc, 'Remove texture');
+    this.dropTexture(m.mapAssetId, materialId);
+    m.mapAssetId = null;
+    m.updatedAt = nowIso();
+    for (const o of this.doc.objects) if (o.materialId === materialId) this.viewport.updateObject(o);
+    this.markDirty('material');
+    this.sync.broadcastMaterial(m);
+  }
+
+  private dropTexture(assetId: string, materialId: string): void {
+    this.viewport.materials.setMap(materialId, null);
+    const tex = this.textures.get(assetId);
+    if (tex) {
+      tex.dispose();
+      this.textures.delete(assetId);
+    }
+    // keep the blob for undo/redo + other materials
+  }
+
+  private textureFromBitmap(bitmap: ImageBitmap): THREE.Texture {
+    const tex = new THREE.Texture(bitmap);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.anisotropy = 4;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  /** Load + assign texture maps for all textured materials (open / rebuild). */
+  async hydrateTextures(): Promise<void> {
+    for (const m of this.doc.materials) {
+      if (m.mapAssetId) await this.attachTextureById(m.mapAssetId);
+    }
+    this.viewport.syncMaterials(this.doc.materials);
+    // re-link maps after sync (sync() preserves the map registry)
+    for (const m of this.doc.materials) {
+      if (m.mapAssetId && this.textures.has(m.mapAssetId)) {
+        this.viewport.materials.setMap(m.id, this.textures.get(m.mapAssetId) ?? null, m);
+      }
+    }
+  }
+
+  private async attachTextureById(assetId: string): Promise<void> {
+    if (this.textures.has(assetId)) return;
+    let blob = await localDb.getBlob(assetId);
+    if (!blob) {
+      let path = this.doc.assets.find((a) => a.id === assetId)?.storagePath ?? null;
+      if (!path) path = await this.sync.fetchAssetPath(assetId); // late-joining peer
+      if (path) {
+        const buf = await this.sync.downloadAsset(path);
+        if (buf) {
+          const meta = this.doc.assets.find((a) => a.id === assetId);
+          blob = new Blob([buf], { type: meta?.mime || 'image/png' });
+          await localDb.saveBlob(assetId, blob);
+        }
+      }
+    }
+    if (!blob) return;
+    try {
+      const bitmap = await createImageBitmap(blob);
+      this.textures.set(assetId, this.textureFromBitmap(bitmap));
+    } catch {
+      /* corrupt image — leave untextured */
+    }
+  }
+
+  textureThumb(assetId: string): string | null {
+    return this.doc.assets.find((a) => a.id === assetId)?.thumb ?? null;
   }
 
   async exportGlb(): Promise<void> {
@@ -630,6 +787,75 @@ export class EditorSession {
     this.markDirty('animation');
   }
 
+  /** All keyed frames in the active clip (selected object, else whole clip). */
+  private keyFrames(): number[] {
+    const clip = activeClip(this.doc);
+    if (!clip) return [];
+    const sel = this.selection.get();
+    const frames = new Set<number>();
+    for (const t of clip.tracks) {
+      if (sel && t.objectId !== sel) continue;
+      for (const k of t.keyframes) frames.add(k.frame);
+    }
+    return [...frames].sort((a, b) => a - b);
+  }
+
+  gotoPrevKey(): void {
+    const frames = this.keyFrames().filter((f) => f < this.playback.frame);
+    if (!frames.length) {
+      this.notice('info', 'No earlier keyframe');
+      return;
+    }
+    this.playback.setFrame(frames[frames.length - 1]);
+  }
+
+  gotoNextKey(): void {
+    const frames = this.keyFrames().filter((f) => f > this.playback.frame);
+    if (!frames.length) {
+      this.notice('info', 'No later keyframe');
+      return;
+    }
+    this.playback.setFrame(frames[0]);
+  }
+
+  /** Toggle linear/step interpolation for the selected object's keys at playhead. */
+  toggleInterpAtPlayhead(): void {
+    const o = this.selectedObject();
+    const clip = activeClip(this.doc);
+    if (!o || !clip) {
+      this.notice('warn', 'Select an object first');
+      return;
+    }
+    this.history.checkpoint(this.doc, 'Toggle interpolation', 800);
+    let mode: 'linear' | 'step' | null = null;
+    for (const t of clip.tracks) {
+      if (t.objectId !== o.id) continue;
+      for (const k of t.keyframes) {
+        if (k.frame !== this.playback.frame) continue;
+        k.interp = k.interp === 'linear' ? 'step' : 'linear';
+        mode = k.interp;
+      }
+    }
+    if (!mode) {
+      this.notice('info', 'No keyframe at the playhead');
+      return;
+    }
+    this.markDirty('animation');
+    this.notice('info', `Interpolation: ${mode}`);
+  }
+
+  interpAtPlayhead(): 'linear' | 'step' | null {
+    const o = this.selectedObject();
+    const clip = activeClip(this.doc);
+    if (!o || !clip) return null;
+    for (const t of clip.tracks) {
+      if (t.objectId !== o.id) continue;
+      const k = t.keyframes.find((x) => x.frame === this.playback.frame);
+      if (k) return k.interp;
+    }
+    return null;
+  }
+
   private applyPose(frame: number): void {
     const clip = activeClip(this.doc);
     if (!clip) return;
@@ -673,6 +899,7 @@ export class EditorSession {
     if (sel && this.doc.objects.some((o) => o.id === sel)) this.select(sel);
     else this.select(null);
     this.playback.setFrame(this.playback.frame);
+    void this.hydrateTextures();
   }
 
   restoreSnapshot(snapshot: { objects: ProjectDoc['objects']; materials: ProjectDoc['materials']; clips: ProjectDoc['clips'] }, label: string): void {
@@ -680,11 +907,26 @@ export class EditorSession {
     this.doc.objects = JSON.parse(JSON.stringify(snapshot.objects)) as ProjectDoc['objects'];
     this.doc.materials = JSON.parse(JSON.stringify(snapshot.materials)) as ProjectDoc['materials'];
     this.doc.clips = JSON.parse(JSON.stringify(snapshot.clips)) as ProjectDoc['clips'];
+    normalizeDoc(this.doc);
     this.rebuildFromDoc();
+    this.applySettings();
     this.markDirty('restore');
   }
 
   // ---------- misc ----------
+  // ---------- scene settings ----------
+  applySettings(): void {
+    const st = this.doc.settings ?? { envIntensity: 1, shadows: true };
+    this.viewport.setShading(this.viewport.getShading(), st.envIntensity);
+    this.viewport.setShadowsEnabled(st.shadows);
+  }
+
+  updateSettings(patch: Partial<{ envIntensity: number; shadows: boolean }>): void {
+    Object.assign(this.doc.settings, patch);
+    this.applySettings();
+    this.markDirty('settings');
+  }
+
   focusSelected(): void {
     this.viewport.focus(this.selection.get());
   }
@@ -702,6 +944,8 @@ export class EditorSession {
     void this.localSave();
     this.sync.dispose();
     this.gizmo.dispose();
+    for (const tex of this.textures.values()) tex.dispose();
+    this.textures.clear();
     this.viewport.dispose();
   }
 }

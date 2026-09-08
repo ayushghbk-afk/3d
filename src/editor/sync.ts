@@ -114,6 +114,8 @@ export class SyncEngine {
       await sb.from('projects').update({ name: doc.name, version: doc.version }).eq('id', doc.id);
 
       // objects: upsert all, delete missing
+      // scene settings ride on the scene row
+      await sb.from('scenes').update({ data: { settings: doc.settings } }).eq('id', this.sceneId);
       const rows = doc.objects.map((o) => ({
         id: o.id, scene_id: this.sceneId as string, project_id: doc.id, name: o.name,
         object_type: o.type, parent_id: o.parentId,
@@ -121,7 +123,11 @@ export class SyncEngine {
         rotation: [o.rotation.x, o.rotation.y, o.rotation.z],
         scale: [o.scale.x, o.scale.y, o.scale.z],
         visible: o.visible, locked: o.locked, material_id: o.materialId,
-        geometry: o.primitive ? { kind: o.primitive.kind, params: o.primitive.params } : null,
+        geometry: o.primitive
+          ? { kind: o.primitive.kind, params: o.primitive.params }
+          : o.light
+            ? { light: o.light }
+            : null,
         asset_id: o.assetId ?? null, version: o.version,
       }));
       if (rows.length) {
@@ -141,6 +147,7 @@ export class SyncEngine {
             base_color: m.baseColor, metalness: m.metalness, roughness: m.roughness,
             emissive: m.emissive, emissive_intensity: m.emissiveIntensity,
             opacity: m.opacity, transparent: m.transparent,
+            side: m.side, flat_shading: m.flatShading, map_asset_id: m.mapAssetId,
           })),
         );
         if (error) throw error;
@@ -188,8 +195,10 @@ export class SyncEngine {
       const { data: proj, error } = await sb.from('projects').select('*').eq('id', projectId).single();
       if (error || !proj) return localDb.getProject(projectId);
       const p = proj as { id: string; name: string; mode: ProjectMode; owner_id: string; version: number; updated_at: string };
-      const { data: scene } = await sb.from('scenes').select('id').eq('project_id', projectId).limit(1).maybeSingle();
+      const { data: scene } = await sb.from('scenes').select('id,data').eq('project_id', projectId).limit(1).maybeSingle();
       const sceneId = (scene as { id: string } | null)?.id ?? null;
+      const sceneData = ((scene as { data?: Record<string, unknown> } | null)?.data ?? {}) as Record<string, unknown>;
+      const cloudSettings = (sceneData.settings ?? null) as ProjectDoc['settings'] | null;
       let objects: SceneObjectData[] = [];
       if (sceneId) {
         const { data } = await sb.from('scene_objects').select('*').eq('scene_id', sceneId);
@@ -222,19 +231,23 @@ export class SyncEngine {
         id: p.id, name: p.name, mode: p.mode, ownerId: p.owner_id,
         thumbnail: local?.thumbnail ?? null,
         objects,
+        settings: cloudSettings ?? local?.settings ?? { envIntensity: 1, shadows: true },
         materials: ((mats ?? []) as Record<string, unknown>[]).map((m) => ({
           id: m.id as string, name: (m.name as string) ?? 'Material',
           baseColor: (m.base_color as string) ?? '#8b9bb4',
           metalness: Number(m.metalness ?? 0.1), roughness: Number(m.roughness ?? 0.7),
           emissive: (m.emissive as string) ?? '#000000', emissiveIntensity: Number(m.emissive_intensity ?? 0),
           opacity: Number(m.opacity ?? 1), transparent: Boolean(m.transparent),
+          side: ((m.side as string) ?? 'front') as 'front' | 'double',
+          flatShading: Boolean(m.flat_shading),
+          mapAssetId: (m.map_asset_id as string) ?? null,
           updatedAt: (m.updated_at as string) ?? nowIso(),
         })),
         clips: clips.length ? clips : local?.clips ?? [],
         assets: ((assets ?? []) as Record<string, unknown>[]).map((a) => ({
           id: a.id as string, name: (a.name as string) ?? 'asset', kind: ((a.kind as string) ?? 'other') as 'model' | 'texture' | 'other',
           mime: (a.mime as string) ?? '', size: Number(a.size_bytes ?? 0),
-          storagePath: (a.storage_path as string) ?? null, local: false, createdAt: (a.created_at as string) ?? nowIso(),
+          storagePath: (a.storage_path as string) ?? null, local: false, thumb: null, createdAt: (a.created_at as string) ?? nowIso(),
         })),
         activeClipId: local?.activeClipId ?? clips[0]?.id ?? null,
         updatedAt: p.updated_at, version: p.version, cloudVersion: p.version,
@@ -251,7 +264,9 @@ export class SyncEngine {
     const pos = num3(r.position, [0, 0, 0]);
     const rot = num3(r.rotation, [0, 0, 0]);
     const scl = num3(r.scale, [1, 1, 1]);
-    const geo = (r.geometry ?? null) as { kind?: SceneObjectData['type']; params?: Record<string, number> } | null;
+    const geo = (r.geometry ?? null) as {
+      kind?: SceneObjectData['type']; params?: Record<string, number>; light?: SceneObjectData['light'];
+    } | null;
     return {
       id: r.id as string, name: (r.name as string) ?? 'Object',
       type: ((r.object_type as string) ?? 'cube') as SceneObjectData['type'],
@@ -261,7 +276,10 @@ export class SyncEngine {
       visible: r.visible !== false, locked: r.locked === true,
       parentId: (r.parent_id as string) ?? null,
       materialId: (r.material_id as string) ?? null,
-      primitive: geo && geo.kind ? { kind: geo.kind as SceneObjectData['primitive'] extends { kind: infer K } | undefined ? K : never, params: geo.params ?? {} } : undefined,
+      primitive: geo && geo.kind && geo.kind !== 'light'
+        ? { kind: geo.kind as SceneObjectData['primitive'] extends { kind: infer K } | undefined ? K : never, params: geo.params ?? {} }
+        : undefined,
+      light: geo?.light ?? undefined,
       assetId: (r.asset_id as string) ?? null,
       updatedAt: (r.updated_at as string) ?? nowIso(),
       version: Number(r.version ?? 1),
@@ -279,22 +297,39 @@ export class SyncEngine {
   }
 
   // ---------- assets ----------
-  async uploadAsset(assetId: string, name: string, buf: ArrayBuffer): Promise<void> {
+  async uploadAsset(
+    assetId: string, name: string, buf: ArrayBuffer,
+    opts?: { kind?: 'model' | 'texture' | 'other'; mime?: string; ext?: string },
+  ): Promise<void> {
     if (!this.ready()) return;
     try {
       const sb = supabase();
       const doc = this.session.doc;
-      const path = `${doc.id}/${assetId}.glb`;
-      const { error } = await sb.storage.from('assets').upload(path, new Blob([buf], { type: 'model/gltf-binary' }), { upsert: true });
+      const kind = opts?.kind ?? 'model';
+      const mime = opts?.mime ?? 'model/gltf-binary';
+      const ext = opts?.ext ?? 'glb';
+      const path = `${doc.id}/${assetId}.${ext}`;
+      const { error } = await sb.storage.from('assets').upload(path, new Blob([buf], { type: mime }), { upsert: true, contentType: mime });
       if (error) throw error;
       await sb.from('assets').upsert({
-        id: assetId, project_id: doc.id, name, kind: 'model',
-        mime: 'model/gltf-binary', size_bytes: buf.byteLength, storage_path: path,
+        id: assetId, project_id: doc.id, name, kind,
+        mime, size_bytes: buf.byteLength, storage_path: path,
       });
       const meta = doc.assets.find((a) => a.id === assetId);
       if (meta) meta.storagePath = path;
     } catch (e) {
       console.warn('asset upload failed', e);
+    }
+  }
+
+  /** Look up a storage path for an asset id (for late-joining peers). */
+  async fetchAssetPath(assetId: string): Promise<string | null> {
+    if (!cloudEnabled) return null;
+    try {
+      const { data } = await supabase().from('assets').select('storage_path').eq('id', assetId).maybeSingle();
+      return ((data as { storage_path: string | null } | null)?.storage_path) ?? null;
+    } catch {
+      return null;
     }
   }
 

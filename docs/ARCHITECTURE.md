@@ -168,6 +168,9 @@ workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 - [ ] Phase 2 — hardening: outliner DnD, multi-select, measurement, shortcuts UI.
 - [ ] Phase 3 — storage pipeline: thumbnails, compression, progressive LOD rows.
 - [ ] Phase 4 — collab polish: cursors, follow mode, conflict UI, invite links.
+- [x] Animation basics+: auto-key record mode, prev/next keyframe, linear/step toggle.
+- [x] Lighting basics: point/spot/directional/ambient/hemisphere + env/shadow scene settings.
+- [x] Material/texture basics: presets, flat/double-sided, emissive intensity, image maps.
 - [ ] Phase 5 — animation: graph editor, GLB clip import, retarget basics.
 - [ ] Phase 6 — modeling: half-edge ops, bevel/loopcut/knife/mirror/subdiv.
 - [ ] Phase 7 — workers/wasm/UV/paint/LOD/node materials.

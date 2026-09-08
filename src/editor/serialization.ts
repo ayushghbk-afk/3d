@@ -25,6 +25,7 @@ export function toSceneJson(doc: ProjectDoc): Record<string, unknown> {
     id: 'main',
     name: 'Main Scene',
     exportedAt: nowIso(),
+    settings: doc.settings,
     objects: doc.objects.map((o) => ({
       id: o.id,
       name: o.name,
@@ -37,6 +38,7 @@ export function toSceneJson(doc: ProjectDoc): Record<string, unknown> {
       locked: o.locked,
       materialId: o.materialId,
       primitive: o.primitive ?? null,
+      light: o.light ?? null,
       assetId: o.assetId ?? null,
       version: o.version,
     })),
@@ -127,13 +129,20 @@ export function fromSceneJson(json: Record<string, unknown>): {
   objects: ProjectDoc['objects'];
   materials: ProjectDoc['materials'];
   clips: ProjectDoc['clips'];
+  settings: ProjectDoc['settings'] | null;
 } | null {
   try {
     const objs = (json.objects ?? []) as ProjectDoc['objects'];
     const mats = (json.materials ?? []) as ProjectDoc['materials'];
     const clips = (json.clips ?? []) as ProjectDoc['clips'];
     if (!Array.isArray(objs) || !Array.isArray(mats)) return null;
-    return { objects: objs, materials: mats, clips: Array.isArray(clips) ? clips : [] };
+    const s = (json.settings ?? null) as ProjectDoc['settings'] | null;
+    return {
+      objects: objs,
+      materials: mats,
+      clips: Array.isArray(clips) ? clips : [],
+      settings: s && typeof s.envIntensity === 'number' ? s : null,
+    };
   } catch {
     return null;
   }

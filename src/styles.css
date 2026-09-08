@@ -176,6 +176,8 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .tl-hint { font-size: 12px; }
 .tl-ruler-wrap { padding: 0 10px 8px; }
 .tl-ruler { width: 100%; border-radius: 8px; border: 1px solid var(--border); touch-action: none; cursor: crosshair; }
+.rec-on { border-color: var(--danger) !important; color: var(--danger); box-shadow: 0 0 8px rgba(244, 63, 94, 0.5); }
+.tex-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
 .tl-empty { padding: 12px; }
 
 /* ---------- mobile bar + sheets ---------- */

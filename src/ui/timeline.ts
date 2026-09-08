@@ -28,6 +28,9 @@ export function buildTimeline(s: EditorSession, el: HTMLElement, togglePlay: () 
         <button class="btn btn-sm" data-tl="addclip" title="New clip">＋</button>
         <button class="btn btn-icon btn-sm" data-tl="stop" title="Stop">⏹</button>
         <button class="btn btn-icon btn-sm" data-tl="play" title="Play/Pause (Space)">${st.playing ? '⏸' : '▶'}</button>
+        <button class="btn btn-icon btn-sm ${s.autoKey.get() ? 'rec-on' : ''}" data-tl="rec" title="Auto-key (record): transform edits write keyframes">⏺</button>
+        <button class="btn btn-icon btn-sm" data-tl="prevkey" title="Previous keyframe">⏮</button>
+        <button class="btn btn-icon btn-sm" data-tl="nextkey" title="Next keyframe">⏭</button>
         <span class="tl-frame" title="Current frame">${st.frame} / ${clip.length}</span>
         <label class="tl-num">fps <input id="tl-fps" class="input input-sm" type="number" min="1" max="120" value="${clip.fps}" /></label>
         <label class="tl-num">len <input id="tl-len" class="input input-sm" type="number" min="1" max="2000" value="${clip.length}" /></label>
@@ -35,6 +38,9 @@ export function buildTimeline(s: EditorSession, el: HTMLElement, togglePlay: () 
         <span class="tl-hint muted">${escapeHtml(describeClip(clip))}</span>
         <button class="btn btn-sm" data-tl="key-all" title="Keyframe all (selected)">◉ All</button>
         <button class="btn btn-sm" data-tl="key" title="Keyframe position (selected)">◉ P</button>
+        <button class="btn btn-sm" data-tl="keyr" title="Keyframe rotation (selected)">◉ R</button>
+        <button class="btn btn-sm" data-tl="keys" title="Keyframe scale (selected)">◉ S</button>
+        <button class="btn btn-sm" data-tl="interp" title="Toggle linear/step at playhead">${s.interpAtPlayhead() === 'step' ? '▮ Step' : s.interpAtPlayhead() === 'linear' ? '∿ Linear' : '≋ Interp'}</button>
         <button class="btn btn-sm" data-tl="keydel" title="Delete keyframe at playhead">✕ key</button>
       </div>
       <div class="tl-ruler-wrap" style="display:${collapsed ? 'none' : 'block'}">
@@ -57,12 +63,21 @@ export function buildTimeline(s: EditorSession, el: HTMLElement, togglePlay: () 
       },
       stop: () => s.playback.stop(),
       play: () => togglePlay(),
+      rec: () => {
+        s.autoKey.set(!s.autoKey.get());
+        render();
+      },
+      prevkey: () => s.gotoPrevKey(),
+      nextkey: () => s.gotoNextKey(),
+      interp: () => s.toggleInterpAtPlayhead(),
       addclip: () => {
         const v = prompt('Clip name', `Clip ${s.doc.clips.length + 1}`);
         s.addClip(v?.trim() || undefined);
       },
       'key-all': () => s.addKeyframeAll(),
       key: () => s.addKeyframeSelected('position'),
+      keyr: () => s.addKeyframeSelected('rotation'),
+      keys: () => s.addKeyframeSelected('scale'),
       keydel: () => {
         (['position', 'rotation', 'scale'] as AnimTrack['property'][]).forEach((p) => s.deleteKeyframeSelected(p));
       },
@@ -91,6 +106,11 @@ export function buildTimeline(s: EditorSession, el: HTMLElement, togglePlay: () 
     if (frameEl && clip) frameEl.textContent = `${st.frame} / ${clip.length}`;
     const playBtn = el.querySelector('[data-tl="play"]');
     if (playBtn) playBtn.textContent = st.playing ? '⏸' : '▶';
+    const interpBtn = el.querySelector('[data-tl="interp"]');
+    if (interpBtn) {
+      const v = s.interpAtPlayhead();
+      interpBtn.textContent = v === 'step' ? '▮ Step' : v === 'linear' ? '∿ Linear' : '≋ Interp';
+    }
     const canvas = el.querySelector('#tl-ruler') as HTMLCanvasElement | null;
     if (canvas && clip) drawRuler(s, canvas, clip.length, st.frame);
   });
