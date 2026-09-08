@@ -59,6 +59,9 @@ export class EditorSession {
   private constructor(doc: ProjectDoc, viewport: Viewport) {
     this.doc = doc;
     this.viewport = viewport;
+    // Sync engine first: store subscriptions below fire synchronously on
+    // subscribe and already touch `this.sync` (presence/locks).
+    this.sync = new SyncEngine(this);
     const u = auth.user.get();
     if (u) {
       this.userId = u.id;
@@ -129,8 +132,6 @@ export class EditorSession {
 
     window.addEventListener('online', this.handleOnline);
     window.addEventListener('offline', this.handleOffline);
-
-    this.sync = new SyncEngine(this);
   }
 
   static async open(projectId: string | null, container: HTMLElement, opts?: { name?: string; mode?: ProjectMode }): Promise<EditorSession> {
