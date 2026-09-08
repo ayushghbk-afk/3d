@@ -1,0 +1,113 @@
+// @vitest-environment jsdom
+import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
+import { createProjectDoc } from '../../src/state/models.js';
+import { updateAiSettings, defaultSettings, aiSettings } from '../../src/ai/settings.js';
+import { openAiPanel } from '../../src/ui/ai-panel.js';
+import type { EditorSession } from '../../src/editor/session.js';
+
+function fakeSession() {
+  const doc = createProjectDoc('Panel Test', 'solo', 'guest');
+  return {
+    doc,
+    addPrimitive: vi.fn((kind: string) => {
+      const o = { id: `obj-${Math.random()}`, name: kind, materialId: null };
+      (doc.objects as unknown[]).push(o);
+      return o;
+    }),
+    addGroup: vi.fn(() => ({ id: `grp-${Math.random()}`, name: 'Group' })),
+    renameObject: vi.fn(),
+    setTransform: vi.fn(),
+    addMaterial: vi.fn(() => {
+      const m = { id: `mat-${Math.random()}`, name: 'M', mapAssetId: null };
+      (doc.materials as unknown[]).push(m);
+      return m;
+    }),
+    updateMaterial: vi.fn(),
+    assignMaterial: vi.fn(),
+    importGlbBytes: vi.fn(async () => ({ id: 'imported-1', name: 'Model' })),
+    uploadTexture: vi.fn(async () => undefined),
+  } as unknown as EditorSession;
+}
+
+function tabBody(): HTMLElement {
+  const el = document.querySelector('#ai-tab-body') as HTMLElement;
+  if (!el) throw new Error('AI tab body did not render');
+  return el;
+}
+
+function switchTab(id: string): void {
+  (document.querySelector(`[data-tab="${id}"]`) as HTMLButtonElement).click();
+}
+
+beforeEach(() => {
+  vi.stubGlobal('indexedDB', new IDBFactory());
+  document.body.innerHTML = '<div id="modal-root"></div><div id="toast-root"></div>';
+  updateAiSettings(() => defaultSettings());
+  (globalThis.URL.createObjectURL as unknown) = vi.fn(() => 'blob:fake');
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe('AI panel', () => {
+  it('renders tabs and builds an offline 3D mockup when AI is down', async () => {
+    const session = fakeSession();
+    openAiPanel(session);
+    await vi.waitFor(() => expect(document.querySelector('#ai3d-go')).not.toBeNull());
+    (tabBody().querySelector('#ai3d-prompt') as HTMLTextAreaElement).value = 'a wooden chair';
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('offline');
+    }));
+    (tabBody().querySelector('#ai3d-go') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect((session.addPrimitive as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBeGreaterThanOrEqual(5));
+    expect(tabBody().querySelector('#ai3d-result')?.textContent).toContain('offline primitive mockup');
+  });
+
+  it('generates and applies a texture with mocked AI', async () => {
+    const session = fakeSession();
+    openAiPanel(session);
+    await vi.waitFor(() => expect(document.querySelector('#ai3d-go')).not.toBeNull());
+    switchTab('texture');
+    (tabBody().querySelector('#aitex-prompt') as HTMLTextAreaElement).value = 'lava rock';
+    const png = new Uint8Array(2048);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(png as unknown as BodyInit, { status: 200, headers: { 'content-type': 'image/png' } })));
+    (tabBody().querySelector('#aitex-go') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(session.uploadTexture).toHaveBeenCalled());
+    expect(tabBody().querySelector('#aitex-result')?.textContent).toContain('Texture applied');
+  });
+
+  it('manages agent tokens from the UI', async () => {
+    const session = fakeSession();
+    openAiPanel(session);
+    await vi.waitFor(() => expect(document.querySelector('#ai3d-go')).not.toBeNull());
+    switchTab('agent');
+    const body = tabBody();
+    expect(body.querySelector('#ag-enabled')).not.toBeNull();
+    expect(body.querySelector('#ag-code')?.textContent).toContain('Web3DStudio.agent');
+    (body.querySelector('#ag-label') as HTMLInputElement).value = 'UI token';
+    (body.querySelector('#ag-new') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(body.querySelector('#ag-secret')).not.toBeNull());
+    const secret = body.querySelector('#ag-secret')?.textContent ?? '';
+    expect(secret.startsWith('w3d_')).toBe(true);
+    expect(aiSettings.get().agent.tokens).toHaveLength(1);
+    (body.querySelector('[data-revoke]') as HTMLButtonElement).click();
+    expect(aiSettings.get().agent.tokens).toHaveLength(0);
+  });
+
+  it('saves custom API settings', async () => {
+    const session = fakeSession();
+    openAiPanel(session);
+    await vi.waitFor(() => expect(document.querySelector('#ai3d-go')).not.toBeNull());
+    switchTab('settings');
+    const body = tabBody();
+    (body.querySelector('input[name="ai-image-prov"][value="custom"]') as HTMLInputElement).click();
+    (body.querySelector('#ai-image-url') as HTMLInputElement).value = 'http://localhost:1234/v1';
+    (body.querySelector('#ai-image-model') as HTMLInputElement).value = 'local-model';
+    (body.querySelector('#ai-save') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(aiSettings.get().imageProvider).toBe('custom'));
+    expect(aiSettings.get().imageCustom.baseUrl).toBe('http://localhost:1234/v1');
+  });
+});

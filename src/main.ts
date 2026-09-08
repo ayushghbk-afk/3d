@@ -4,6 +4,7 @@ import { Router, type Route } from './ui/router.js';
 import { mountDashboard, mountLogin, handleJoinRoute } from './ui/dashboard.js';
 import { toast } from './ui/toast.js';
 import { registerPwa } from './pwa.js';
+import { initAi } from './ai/index.js';
 
 async function boot(): Promise<void> {
   const app = document.getElementById('app') as HTMLElement;
@@ -15,6 +16,8 @@ async function boot(): Promise<void> {
   } catch (e) {
     console.error('auth init failed', e);
   }
+
+  void initAi().catch((e) => console.warn('AI init failed', e));
 
   const router = new Router(async (route: Route) => {
     if (route.name === 'join') {

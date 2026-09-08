@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:pages": "playwright test",
     "preview:pages": "node scripts/serve-pages.mjs",
-    "supabase:setup": "node scripts/generate-supabase-setup.mjs"
+    "supabase:setup": "node scripts/generate-supabase-setup.mjs",
+    "agent-relay": "node server/agent-relay.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

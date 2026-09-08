@@ -212,6 +212,23 @@ kbd { background: var(--bg2); border: 1px solid var(--border); border-radius: 6p
 .gh-file { display: flex; gap: 8px; align-items: center; font-size: 13px; background: var(--bg2); border-radius: 6px; padding: 5px 8px; cursor: pointer; }
 .gh-file input { accent-color: var(--accent); }
 
+/* ---------- AI Studio ---------- */
+.ai-tabs { margin-bottom: 12px; flex-wrap: wrap; }
+.ai-tab-body { min-height: 200px; }
+.ai-tab-body textarea.input { width: 100%; resize: vertical; }
+.ai-progress { margin: 10px 0; }
+.ai-progress-bar { height: 8px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.ai-progress-bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #9d6bff); transition: width 0.3s; }
+.ai-preview { max-width: 100%; max-height: 220px; border-radius: 10px; border: 1px solid var(--border); margin-top: 8px; }
+.ai-chat { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; margin-bottom: 10px; }
+.ai-chat:empty::after { content: 'Ask anything about this project…'; color: var(--muted); font-size: 13px; }
+.ai-msg { padding: 8px 12px; border-radius: 10px; max-width: 92%; white-space: pre-wrap; word-break: break-word; }
+.ai-msg-user { align-self: flex-end; background: #233252; border: 1px solid var(--accent); }
+.ai-msg-assistant { align-self: flex-start; background: var(--bg2); border: 1px solid var(--border); }
+.ai-code { display: block; white-space: pre-wrap; padding: 10px; max-height: 240px; overflow-y: auto; font-size: 12px; margin-top: 8px; }
+.ai-activity { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+.ai-log-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+
 /* ---------- toasts ---------- */
 #toast-root { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; width: max-content; max-width: calc(100vw - 32px); }
 .toast { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; opacity: 0; transform: translateY(8px); transition: all 0.25s; max-width: calc(100vw - 32px); }
