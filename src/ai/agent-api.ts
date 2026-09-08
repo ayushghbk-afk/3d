@@ -738,7 +738,7 @@ export class AgentAPI {
       : undefined;
     const plan = planPaint(t.doc, groupIds);
     if (!plan.length) {
-      return { mode: t.mode, projectId: t.doc.id, applied: 0, groups: 0, note: 'No paintable parts with a recognized role.' };
+      return { mode: t.mode, projectId: t.doc.id, applied: 0, groups: 0, note: 'No paintable parts with a recognized role — group the model and name parts (Seat, Leg, Wheel, …) so the AI can identify it.' };
     }
     if (t.mode === 'live' && t.session) {
       const applied = t.session.applyPaint(plan.map((item) => ({
@@ -826,12 +826,17 @@ export class AgentAPI {
       }, ctx)) as { provider: string; seed: number };
       results.push({ role: entry.role, materialId: entry.materialId, provider: out.provider, seed: out.seed });
     }
+    const paintedCount = (paint.plan ?? []).length;
     return {
       mode: t.mode,
       projectId: t.doc.id,
-      painted: (paint.plan ?? []).length,
+      painted: paintedCount,
       textured: results,
-      note: results.length ? undefined : 'No roles with texture prompts (colors were still applied).',
+      note: results.length
+        ? undefined
+        : paintedCount === 0
+          ? 'No paintable parts with a recognized role — group the model and name parts (Seat, Leg, Wheel, …) so the AI can identify it.'
+          : 'No roles with texture prompts (colors were still applied).',
     };
   }
 

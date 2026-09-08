@@ -453,8 +453,13 @@ function renderPaintTab(session: EditorSession, body: HTMLElement): void {
       const out = (await agent.call('scene.autopaint', { projectId }, PAINT_CTX)) as {
         applied: number;
         groups: number;
+        note?: string;
       };
       setBusy(false, '');
+      if (!out.applied) {
+        resultEl.innerHTML = `<div class="banner banner-warn">⚠️ ${escapeHtml(out.note ?? 'Nothing paintable — no recognized part roles.')}</div>`;
+        return;
+      }
       resultEl.innerHTML = `<div class="banner banner-info">✅ Painted <b>${out.applied}</b> parts across <b>${out.groups}</b> models. Undo reverts it.</div>`;
       toast(`Auto-painted ${out.applied} parts`, 'success');
     } catch (e) {
@@ -468,13 +473,18 @@ function renderPaintTab(session: EditorSession, body: HTMLElement): void {
     setBusy(true, 'painting + generating textures (can take minutes on the free tier)…');
     try {
       const out = (await agent.call('scene.autotexture', { projectId, size, maxTextures }, PAINT_CTX)) as {
-        groups: string[];
-        textures: { role: string; provider: string; seed: number }[];
+        painted: number;
+        textured: { role: string; provider: string; seed: number }[];
+        note?: string;
       };
       setBusy(false, '');
+      if (!out.textured.length) {
+        resultEl.innerHTML = `<div class="banner banner-warn">⚠️ ${escapeHtml(out.note ?? 'Nothing textured — no recognized part roles.')}</div>`;
+        return;
+      }
       resultEl.innerHTML = `
-        <div class="banner banner-info">✅ Textured <b>${out.textures.length}</b> part roles (${out.textures.map((t) => escapeHtml(t.role)).join(', ') || '—'}) via ${escapeHtml(out.textures[0]?.provider ?? 'AI')}.</div>`;
-      toast(`Auto-textured ${out.textures.length} roles`, 'success');
+        <div class="banner banner-info">✅ Painted ${out.painted} parts + textured <b>${out.textured.length}</b> part roles (${out.textured.map((t) => escapeHtml(t.role)).join(', ') || '—'}) via ${escapeHtml(out.textured[0]?.provider ?? 'AI')}.</div>`;
+      toast(`Auto-textured ${out.textured.length} roles`, 'success');
     } catch (e) {
       fail(e);
     }
