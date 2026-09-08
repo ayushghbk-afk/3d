@@ -11,6 +11,7 @@ async function boot(): Promise<void> {
 
   try {
     await auth.init();
+    if (auth.error.get()) toast(auth.error.get() as string, 'warn');
   } catch (e) {
     console.error('auth init failed', e);
   }

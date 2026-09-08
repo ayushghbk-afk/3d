@@ -15,6 +15,7 @@ import {
 import { localDb } from '../lib/indexeddb.js';
 import { auth } from '../lib/auth.js';
 import { cloudEnabled } from '../lib/supabase.js';
+import { cloudErrorMessage } from '../lib/cloud-errors.js';
 import { uid, nowIso, debounce, throttle, makeThumb } from '../lib/utils.js';
 
 export type SaveState = 'saved' | 'saving' | 'local' | 'offline' | 'error';
@@ -37,7 +38,8 @@ export class EditorSession {
   transformMode = new Store<TransformMode>('translate');
   shadingMode = new Store<ShadingMode>('material');
   cameraType = new Store<CameraType>('perspective');
-  saveState = new Store<SaveState>('saved');
+  saveState = new Store<SaveState>('local');
+  syncError = new Store<string | null>(null);
   online = new Store<boolean>(navigator.onLine);
   peers = new Store<PresenceUser[]>([]);
   locks = new Store<Map<string, PresenceUser>>(new Map());
@@ -50,6 +52,7 @@ export class EditorSession {
 
   onNotice: ((n: SessionNotice) => void) | null = null;
   onRecovery: ((local: ProjectDoc, cloud: ProjectDoc) => void) | null = null;
+  pendingRecovery: ProjectDoc | null = null;
 
   private blobs = new Map<string, ArrayBuffer>(); // assetId -> glb bytes (runtime cache)
   private textures = new Map<string, THREE.Texture>(); // assetId -> gpu texture (owned here)
@@ -221,7 +224,7 @@ export class EditorSession {
         if (thumb) this.doc.thumbnail = thumb;
       }
       await localDb.saveProject(this.doc);
-      if (this.saveState.get() !== 'offline') this.saveState.set(cloudEnabled ? this.saveState.get() : 'local');
+      if (this.saveState.get() !== 'offline') this.saveState.set(cloudEnabled && auth.user.get() && !auth.user.get()?.guest ? this.saveState.get() : 'local');
     } catch (e) {
       console.error('local save failed', e);
       this.saveState.set('error');
@@ -229,14 +232,20 @@ export class EditorSession {
   }
 
   async cloudSave(): Promise<void> {
-    if (this.disposed || !this.sync.ready()) return;
+    if (this.disposed || !this.canEdit.get()) return;
     if (!navigator.onLine) {
       this.saveState.set('offline');
       return;
     }
+    if (!this.sync.ready()) return;
     this.saveState.set('saving');
-    const ok = await this.sync.pushDoc(this.doc);
-    this.saveState.set(ok ? 'saved' : 'offline');
+    try {
+      const ok = await this.sync.pushDoc(this.doc);
+      this.saveState.set(ok ? (this.doc.cloudVersion === this.doc.version ? 'saved' : 'saving') : (navigator.onLine ? 'error' : 'offline'));
+    } catch (e) {
+      this.syncError.set(cloudErrorMessage(e));
+      this.saveState.set('error');
+    }
   }
 
   async forceSave(): Promise<void> {

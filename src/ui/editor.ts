@@ -1,6 +1,7 @@
 import { EditorSession } from '../editor/session.js';
 import type { PrimitiveType, TransformMode } from '../state/models.js';
 import { cloudEnabled } from '../lib/supabase.js';
+import { localDb } from '../lib/indexeddb.js';
 import { pickFiles } from '../lib/utils.js';
 import { toast } from './toast.js';
 import { nav } from './router.js';
@@ -25,7 +26,10 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
       session.redo();
     } else if (mod && e.key.toLowerCase() === 's') {
       e.preventDefault();
-      void session.forceSave().then(() => toast('Saved', 'success'));
+      void session.forceSave().then(() => {
+        if (!session) return;
+        toast(session.syncError.get() || (session.saveState.get() === 'saved' ? 'Saved to cloud' : 'Saved on this device'), session.syncError.get() ? 'warn' : 'success');
+      });
     } else if (mod && e.key.toLowerCase() === 'd') {
       e.preventDefault();
       session.duplicateObject();
@@ -115,17 +119,30 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
         title: 'Sync conflict',
         body,
         actions: [
-          { label: 'Keep mine', onClick: () => { if (session) void session.cloudSave(); } },
+          { label: 'Keep mine', onClick: async () => {
+            if (!session) return;
+            session.pendingRecovery = null;
+            session.doc.version = Math.max(session.doc.version, cloud.version) + 1;
+            await session.cloudSave();
+            if (!session.syncError.get()) await localDb.clearQueue((await localDb.listQueue(session.doc.id)).map((op) => op.id));
+          } },
           {
             label: 'Use cloud', kind: 'primary',
-            onClick: () => {
+            onClick: async () => {
               if (!session) return;
-              session.restoreSnapshot({ objects: cloud.objects, materials: cloud.materials, clips: cloud.clips }, 'cloud');
+              // Restore the whole project, including settings and asset metadata.
+              // Reload rehydrates the viewport/textures without scheduling an overwrite.
+              session.dispose();
+              await localDb.saveProject(cloud);
+              await localDb.clearQueue((await localDb.listQueue(cloud.id)).map((op) => op.id));
+              location.reload();
             },
           },
         ],
       });
     };
+    if (session.pendingRecovery) session.onRecovery(session.doc, session.pendingRecovery);
+    if (session.syncError.get() && !session.pendingRecovery) toast(session.syncError.get() as string, 'warn');
     session.onNotice = (n) => toast(n.msg, n.kind === 'info' ? 'info' : n.kind);
   }
 
@@ -153,6 +170,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     };
 
     // save state
+    unsubs.push(s.syncError.subscribe((error) => { saveEl.title = error ?? 'Project save status'; }));
     unsubs.push(
       s.saveState.subscribe((st) => {
         const map = { saved: '✓ Saved', saving: '… Saving', local: '💾 Local', offline: '⚠ Offline', error: '✕ Error' } as const;

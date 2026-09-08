@@ -1,5 +1,6 @@
 import { auth } from '../lib/auth.js';
-import { cloudEnabled, supabase } from '../lib/supabase.js';
+import { cloudEnabled, cloudConfigError, supabase } from '../lib/supabase.js';
+import { cloudErrorMessage } from '../lib/cloud-errors.js';
 import { localDb } from '../lib/indexeddb.js';
 import { createProjectDoc, type ProjectDoc, type ProjectMode } from '../state/models.js';
 import { escapeHtml, timeAgo } from '../lib/utils.js';
@@ -63,9 +64,13 @@ export function mountDashboard(root: HTMLElement): () => void {
   authBtn.onclick = async () => {
     const u = auth.user.get();
     if (u && !u.guest) {
-      await auth.signOut();
-      toast('Signed out');
-      void load();
+      try {
+        await auth.signOut();
+        toast('Signed out');
+        void load();
+      } catch (e) {
+        toast(cloudErrorMessage(e), 'error');
+      }
     } else {
       nav('#/login');
     }
@@ -87,29 +92,35 @@ export function mountDashboard(root: HTMLElement): () => void {
       const locals = await localDb.listProjects();
       const localById = new Map(locals.map((d) => [d.id, d]));
       const cards: CardProject[] = [];
+      let cloudFailure: string | null = null;
       const u = auth.user.get();
 
       if (cloudEnabled && u && !u.guest) {
-        const sb = supabase();
-        const { data, error } = await sb.from('projects').select('id,name,mode,updated_at,thumbnail_url').order('updated_at', { ascending: false }).limit(50);
-        if (error) throw error;
-        const rows = (data ?? []) as { id: string; name: string; mode: ProjectMode; updated_at: string; thumbnail_url: string | null }[];
-        let counts = new Map<string, number>();
-        if (rows.length) {
-          const { data: members } = await sb.from('project_members').select('project_id').in('project_id', rows.map((r) => r.id));
-          counts = new Map<string, number>();
-          for (const m of (members ?? []) as { project_id: string }[]) counts.set(m.project_id, (counts.get(m.project_id) ?? 0) + 1);
-        }
-        for (const r of rows) {
-          const local = localById.get(r.id);
-          localById.delete(r.id);
-          const queue = await localDb.listQueue(r.id);
-          cards.push({
-            id: r.id, name: r.name, mode: r.mode,
-            updatedAt: local && local.updatedAt > r.updated_at ? local.updatedAt : r.updated_at,
-            thumbnail: local?.thumbnail ?? null, members: counts.get(r.id) ?? 1,
-            cloud: true, pending: queue.length,
-          });
+        try {
+          const sb = supabase();
+          const { data, error } = await sb.from('projects').select('id,name,mode,updated_at,thumbnail_url').order('updated_at', { ascending: false }).limit(50);
+          if (error) throw error;
+          const rows = (data ?? []) as { id: string; name: string; mode: ProjectMode; updated_at: string; thumbnail_url: string | null }[];
+          let counts = new Map<string, number>();
+          if (rows.length) {
+            const { data: members, error: membersError } = await sb.from('project_members').select('project_id').in('project_id', rows.map((r) => r.id));
+            if (membersError) throw membersError;
+            counts = new Map<string, number>();
+            for (const m of (members ?? []) as { project_id: string }[]) counts.set(m.project_id, (counts.get(m.project_id) ?? 0) + 1);
+          }
+          for (const r of rows) {
+            const local = localById.get(r.id);
+            localById.delete(r.id);
+            const queue = await localDb.listQueue(r.id);
+            cards.push({
+              id: r.id, name: r.name, mode: r.mode,
+              updatedAt: local && local.updatedAt > r.updated_at ? local.updatedAt : r.updated_at,
+              thumbnail: local?.thumbnail ?? r.thumbnail_url ?? null, members: counts.get(r.id) ?? 1,
+              cloud: true, pending: queue.length,
+            });
+          }
+        } catch (e) {
+          cloudFailure = cloudErrorMessage(e);
         }
       }
       // local-only projects (or everything in local mode)
@@ -122,13 +133,24 @@ export function mountDashboard(root: HTMLElement): () => void {
       }
       cards.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 
+      if (cancelled) return;
       const pendingTotal = cards.reduce((a, c) => a + c.pending, 0);
-      banner.innerHTML =
-        !cloudEnabled
-          ? `<div class="banner banner-info">Local mode — projects save on this device. Add Supabase keys (see README) for cloud sync & teams.</div>`
-          : pendingTotal > 0
-            ? `<div class="banner banner-warn">⚠ ${pendingTotal} change(s) waiting to sync. <button class="btn btn-sm" id="sync-now">Sync now</button></div>`
-            : '';
+      const warning = cloudFailure || cloudConfigError || auth.error.get();
+      banner.innerHTML = warning
+        ? `<div class="banner banner-warn">${escapeHtml(warning)} <button class="btn btn-sm" id="retry-cloud">Retry</button></div>`
+        : !cloudEnabled
+          ? `<div class="banner banner-info">Local mode — projects save on this device. Add Supabase public configuration (see README) for cloud sync & teams.</div>`
+          : !u || u.guest
+            ? `<div class="banner banner-info">Sign in to sync projects across devices and collaborate. Until then, projects save on this device only.</div>`
+            : pendingTotal > 0
+              ? `<div class="banner banner-warn">⚠ ${pendingTotal} change(s) waiting to sync. <button class="btn btn-sm" id="sync-now">Sync now</button></div>`
+              : '';
+      const retryBtn = banner.querySelector('#retry-cloud') as HTMLButtonElement | null;
+      if (retryBtn) retryBtn.onclick = () => void load();
+      if (cloudFailure) {
+        badge.textContent = '⚠ Cloud unavailable';
+        badge.className = 'badge badge-warn';
+      } else refreshAuth();
       const syncBtn = banner.querySelector('#sync-now') as HTMLButtonElement | null;
       if (syncBtn) syncBtn.onclick = () => toast('Open a project to sync its pending changes');
 
@@ -140,7 +162,7 @@ export function mountDashboard(root: HTMLElement): () => void {
         .map(
           (c) => `
         <article class="card" data-id="${c.id}" tabindex="0" role="button" aria-label="Open ${escapeHtml(c.name)}">
-          <div class="card-thumb">${c.thumbnail ? `<img src="${c.thumbnail}" alt="" />` : '<span class="card-thumb-ph">⬢</span>'}</div>
+          <div class="card-thumb">${c.thumbnail ? `<img src="${escapeHtml(c.thumbnail)}" alt="" />` : '<span class="card-thumb-ph">⬢</span>'}</div>
           <div class="card-body">
             <div class="card-title">${escapeHtml(c.name)}</div>
             <div class="card-meta">
@@ -169,12 +191,19 @@ export function mountDashboard(root: HTMLElement): () => void {
           e.stopPropagation();
           const id = (el as HTMLElement).dataset.del as string;
           if (!confirm('Delete this project? (Local copy is removed; cloud copy is removed if you own it.)')) return;
-          await localDb.deleteProject(id);
-          if (cloudEnabled && auth.user.get() && !auth.user.get()?.guest) {
-            await supabase().from('projects').delete().eq('id', id);
+          try {
+            if (cloudEnabled && auth.user.get() && !auth.user.get()?.guest && cards.find((c) => c.id === id)?.cloud) {
+              const { data, error } = await supabase().from('projects').delete().eq('id', id).select('id');
+              if (error) throw error;
+              if (!data?.length) throw new Error('Only a project owner or admin can delete this cloud project.');
+            }
+            await localDb.deleteProject(id);
+            await localDb.clearQueue((await localDb.listQueue(id)).map((op) => op.id));
+            toast('Project deleted', 'success');
+            void load();
+          } catch (e) {
+            toast(cloudErrorMessage(e), 'error');
           }
-          toast('Project deleted', 'success');
-          void load();
         });
       });
     } catch (e) {
@@ -300,8 +329,8 @@ export function mountLogin(root: HTMLElement): () => void {
 
   if (!cloudEnabled) {
     forms.innerHTML = `
-      <div class="banner banner-info">Cloud is not configured — the app runs in <b>local mode</b>.
-      Add <code>VITE_SUPABASE_URL</code> + <code>VITE_SUPABASE_ANON_KEY</code> (see README) to enable accounts & teams.</div>
+      <div class="banner banner-info">${cloudConfigError ? escapeHtml(cloudConfigError) : `Cloud is not configured — the app runs in <b>local mode</b>.
+      Add <code>VITE_SUPABASE_URL</code> + <code>VITE_SUPABASE_PUBLISHABLE_KEY</code> (see docs/DEPLOYMENT.md) to enable accounts & teams.`}</div>
       <button id="guest-btn" class="btn btn-primary">Continue as Guest</button>`;
     (forms.querySelector('#guest-btn') as HTMLButtonElement).onclick = () => nav('#/');
     return () => undefined;
@@ -314,55 +343,90 @@ export function mountLogin(root: HTMLElement): () => void {
       <button class="tab" data-tab="magic">Magic link</button>
     </div>
     <div id="tab-body"></div>
-    <p id="auth-err" class="error"></p>`;
+    <p id="auth-err" class="error" role="alert"></p>
+    <p id="auth-info" class="muted" role="status"></p>`;
   const tabBody = forms.querySelector('#tab-body') as HTMLElement;
   const errEl = forms.querySelector('#auth-err') as HTMLElement;
+  const infoEl = forms.querySelector('#auth-info') as HTMLElement;
   let tab = 'in';
+  let pending = false;
+  let disposed = false;
 
   const render = () => {
-    errEl.textContent = '';
+    errEl.textContent = auth.error.get() ?? '';
+    infoEl.textContent = '';
     tabBody.innerHTML = `
-      ${tab === 'up' ? '<label class="field">Display name<input id="a-name" class="input" autocomplete="nickname" /></label>' : ''}
-      <label class="field">Email<input id="a-email" class="input" type="email" autocomplete="email" /></label>
-      ${tab !== 'magic' ? '<label class="field">Password<input id="a-pass" class="input" type="password" autocomplete="current-password" /></label>' : ''}
-      <button id="a-go" class="btn btn-primary btn-block">${tab === 'in' ? 'Sign in' : tab === 'up' ? 'Create account' : 'Send magic link'}</button>`;
-    (tabBody.querySelector('#a-go') as HTMLButtonElement).onclick = async () => {
+      <form id="auth-form">
+        ${tab === 'up' ? '<label class="field">Display name<input id="a-name" class="input" autocomplete="nickname" maxlength="80" /></label>' : ''}
+        <label class="field">Email<input id="a-email" class="input" type="email" autocomplete="email" required /></label>
+        ${tab !== 'magic' ? `<label class="field">Password<input id="a-pass" class="input" type="password" autocomplete="${tab === 'up' ? 'new-password' : 'current-password'}" ${tab === 'up' ? 'minlength="6"' : ''} required /></label>` : ''}
+        <button id="a-go" type="submit" class="btn btn-primary btn-block">${tab === 'in' ? 'Sign in' : tab === 'up' ? 'Create account' : 'Send magic link'}</button>
+      </form>`;
+    (tabBody.querySelector('#auth-form') as HTMLFormElement).onsubmit = async (event) => {
+      event.preventDefault();
+      if (pending) return;
       const email = (tabBody.querySelector('#a-email') as HTMLInputElement).value.trim();
       if (!email) {
         errEl.textContent = 'Email is required';
         return;
       }
-      let err: string | null = null;
-      if (tab === 'in') {
-        const pass = (tabBody.querySelector('#a-pass') as HTMLInputElement).value;
-        err = await auth.signIn(email, pass);
-      } else if (tab === 'up') {
-        const pass = (tabBody.querySelector('#a-pass') as HTMLInputElement).value;
-        const name = (tabBody.querySelector('#a-name') as HTMLInputElement).value.trim() || email.split('@')[0];
-        if (pass.length < 6) {
-          errEl.textContent = 'Password needs at least 6 characters';
-          return;
+      const submit = tabBody.querySelector('#a-go') as HTMLButtonElement;
+      const originalLabel = submit.textContent;
+      pending = true;
+      submit.disabled = true;
+      submit.textContent = 'Please wait…';
+      forms.querySelectorAll<HTMLButtonElement>('.tab').forEach((t) => { t.disabled = true; });
+      errEl.textContent = '';
+      infoEl.textContent = '';
+      try {
+        if (tab === 'in') {
+          const pass = (tabBody.querySelector('#a-pass') as HTMLInputElement).value;
+          const error = await auth.signIn(email, pass);
+          if (disposed) return;
+          if (error) errEl.textContent = error;
+          else nav('#/');
+        } else if (tab === 'up') {
+          const pass = (tabBody.querySelector('#a-pass') as HTMLInputElement).value;
+          const name = (tabBody.querySelector('#a-name') as HTMLInputElement).value.trim() || email.split('@')[0];
+          const result = await auth.signUp(email, pass, name);
+          if (disposed) return;
+          if (result.error) errEl.textContent = result.error;
+          else if (result.needsEmailConfirmation) {
+            infoEl.textContent = 'Check your email to confirm your account, then sign in. Check spam too if the email does not arrive.';
+          } else nav('#/');
+        } else {
+          const error = await auth.signInMagic(email);
+          if (disposed) return;
+          if (error) errEl.textContent = error;
+          else infoEl.textContent = 'Check your email for the magic link. It will bring you back to this app.';
         }
-        err = await auth.signUp(email, pass, name);
-      } else {
-        err = await auth.signInMagic(email);
-        if (!err) toast('Check your email for the magic link', 'success');
+      } catch (e) {
+        if (!disposed) errEl.textContent = cloudErrorMessage(e);
+      } finally {
+        pending = false;
+        if (!disposed) {
+          submit.disabled = false;
+          submit.textContent = originalLabel;
+          forms.querySelectorAll<HTMLButtonElement>('.tab').forEach((t) => { t.disabled = false; });
+        }
       }
-      if (err) errEl.textContent = err;
-      else if (tab !== 'magic') nav('#/');
     };
   };
-  forms.querySelectorAll('.tab').forEach((t) =>
-    (t as HTMLButtonElement).onclick = () => {
+  forms.querySelectorAll<HTMLButtonElement>('.tab').forEach((t) => {
+    t.onclick = () => {
+      if (pending) return;
       forms.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
       t.classList.add('active');
-      tab = (t as HTMLElement).dataset.tab as string;
+      tab = t.dataset.tab as string;
       render();
-    },
-  );
+    };
+  });
   render();
   const unsub = auth.user.subscribe((u) => {
     if (u && !u.guest) nav('#/');
   });
-  return () => unsub();
+  return () => {
+    disposed = true;
+    unsub();
+  };
 }
