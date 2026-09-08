@@ -2,6 +2,7 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import type { EditorSession } from './session.js';
 import { cloudEnabled, supabase } from '../lib/supabase.js';
 import { auth } from '../lib/auth.js';
+import { cloudErrorMessage } from '../lib/cloud-errors.js';
 import { localDb } from '../lib/indexeddb.js';
 import { uid, nowIso } from '../lib/utils.js';
 import type { MaterialData, PresenceUser, ProjectDoc, ProjectMode, SceneObjectData, TeamRole } from '../state/models.js';
@@ -45,6 +46,7 @@ export class SyncEngine {
   private sceneId: string | null = null;
   private selfColor = '#4ade80';
   private disposed = false;
+  private pendingWrite: Promise<boolean> = Promise.resolve(true);
 
   constructor(private session: EditorSession) {}
 
@@ -60,62 +62,86 @@ export class SyncEngine {
     if (!u) return;
     this.selfColor = colorFor(u.id);
     try {
-      await this.ensureCloudProject();
+      const created = await this.ensureCloudProject();
       this.subscribe();
       this.lockSweep = setInterval(() => this.sweepLocks(), 10000);
       // reconcile: pull cloud, compare with local
       const cloud = await SyncEngine.pullStandalone(this.session.doc.id);
       if (cloud && cloud.updatedAt > this.session.doc.updatedAt && cloud.version !== this.session.doc.version) {
+        this.session.pendingRecovery = cloud;
+        this.session.syncError.set('Cloud has a newer revision. Resolve the sync conflict before saving.');
         this.session.onRecovery?.(this.session.doc, cloud);
+        return;
       }
       await this.flushQueue();
+      if (created) await this.session.cloudSave();
+      else if (this.session.doc.cloudVersion === this.session.doc.version) this.session.saveState.set('saved');
     } catch (e) {
       console.warn('sync start failed (offline mode)', e);
-      this.session.saveState.set('offline');
+      this.session.saveState.set(navigator.onLine ? 'error' : 'offline');
+      this.session.syncError.set(cloudErrorMessage(e));
     }
   }
 
   // ---------- durable persistence ----------
-  private async ensureCloudProject(): Promise<void> {
+  private async ensureCloudProject(): Promise<boolean> {
     const sb = supabase();
     const doc = this.session.doc;
     const u = auth.user.get();
-    if (!u || u.guest) return;
-    const { data: existing } = await sb.from('projects').select('id,version').eq('id', doc.id).maybeSingle();
+    if (!u || u.guest) return false;
+    const { data: existing } = await sb.from('projects').select('id,version,owner_id').eq('id', doc.id).maybeSingle().throwOnError();
     if (!existing) {
-      const { error } = await sb.from('projects').insert({
+      await sb.from('projects').insert({
         id: doc.id, name: doc.name, mode: doc.mode, owner_id: u.id, version: doc.version,
-      });
-      if (error) throw error;
-      await sb.from('project_members').insert({ project_id: doc.id, user_id: u.id, role: 'owner' });
-      const { data: scene } = await sb.from('scenes').insert({ project_id: doc.id, name: 'Main Scene' }).select('id').single();
-      this.sceneId = (scene as { id: string } | null)?.id ?? null;
+      }).throwOnError();
+      // Adopt a local/guest project only after the server accepted its creation.
+      doc.ownerId = u.id;
+      await sb.from('project_members').insert({ project_id: doc.id, user_id: u.id, role: 'owner' }).throwOnError();
     } else {
-      const { data: scene } = await sb.from('scenes').select('id').eq('project_id', doc.id).limit(1).maybeSingle();
-      this.sceneId = (scene as { id: string } | null)?.id ?? null;
-      if (!this.sceneId) {
-        const { data: created } = await sb.from('scenes').insert({ project_id: doc.id, name: 'Main Scene' }).select('id').single();
-        this.sceneId = (created as { id: string } | null)?.id ?? null;
-      }
+      doc.ownerId = existing.owner_id;
     }
-    // role -> edit permission
-    const { data: me } = await sb.from('project_members').select('role').eq('project_id', doc.id).eq('user_id', u.id).maybeSingle();
-    const role = ((me as { role: TeamRole } | null)?.role ?? (doc.ownerId === u.id ? 'owner' : 'viewer')) as TeamRole;
+    const { data: me } = await sb.from('project_members').select('role').eq('project_id', doc.id).eq('user_id', u.id).maybeSingle().throwOnError();
+    const role: TeamRole = doc.ownerId === u.id ? 'owner' : (me?.role ?? 'viewer');
     this.session.canEdit.set(role !== 'viewer');
+
+    const { data: scene } = await sb.from('scenes').select('id').eq('project_id', doc.id).limit(1).maybeSingle().throwOnError();
+    this.sceneId = scene?.id ?? null;
+    if (!this.sceneId && this.session.canEdit.get()) {
+      const { data: created } = await sb.from('scenes').insert({ project_id: doc.id, name: 'Main Scene' }).select('id').single().throwOnError();
+      this.sceneId = created.id;
+    }
+    return !existing;
   }
 
-  async pushDoc(doc: ProjectDoc): Promise<boolean> {
-    if (!this.ready()) return false;
+  /** Serialize saves and freeze each snapshot so edits during a request cannot be
+   * mistaken for an already-synced revision. Supabase resolves { error } by default.
+   */
+  pushDoc(doc: ProjectDoc): Promise<boolean> {
+    const snapshot = JSON.parse(JSON.stringify(doc)) as ProjectDoc;
+    const write = async () => {
+      const ok = await this.persistDoc(snapshot);
+      if (ok) {
+        doc.cloudVersion = Math.max(doc.cloudVersion, snapshot.version);
+        await localDb.saveProject(doc);
+      }
+      return ok;
+    };
+    const result = this.pendingWrite.then(write, write);
+    this.pendingWrite = result.catch(() => false);
+    return result;
+  }
+
+  private async persistDoc(doc: ProjectDoc): Promise<boolean> {
+    if (!this.ready() || this.session.pendingRecovery) return false;
     try {
       const sb = supabase();
       if (!this.sceneId) await this.ensureCloudProject();
-      if (!this.sceneId) return false;
-
-      await sb.from('projects').update({ name: doc.name, version: doc.version }).eq('id', doc.id);
+      if (!this.sceneId || !this.session.canEdit.get()) return false;
+      doc.ownerId = this.session.doc.ownerId;
 
       // objects: upsert all, delete missing
       // scene settings ride on the scene row
-      await sb.from('scenes').update({ data: { settings: doc.settings } }).eq('id', this.sceneId);
+      await sb.from('scenes').update({ data: { settings: doc.settings } }).eq('id', this.sceneId).select('id').single().throwOnError();
       const rows = doc.objects.map((o) => ({
         id: o.id, scene_id: this.sceneId as string, project_id: doc.id, name: o.name,
         object_type: o.type, parent_id: o.parentId,
@@ -134,10 +160,10 @@ export class SyncEngine {
         const { error } = await sb.from('scene_objects').upsert(rows);
         if (error) throw error;
       }
-      const { data: remoteObjs } = await sb.from('scene_objects').select('id').eq('scene_id', this.sceneId);
+      const { data: remoteObjs } = await sb.from('scene_objects').select('id').eq('scene_id', this.sceneId).throwOnError();
       const localIds = new Set(doc.objects.map((o) => o.id));
       const stale = ((remoteObjs ?? []) as { id: string }[]).map((r) => r.id).filter((id) => !localIds.has(id));
-      if (stale.length) await sb.from('scene_objects').delete().in('id', stale);
+      if (stale.length) await sb.from('scene_objects').delete().in('id', stale).throwOnError();
 
       // materials
       if (doc.materials.length) {
@@ -154,8 +180,8 @@ export class SyncEngine {
       }
 
       // animations: replace (simple + correct at debounce scale)
-      const { data: anims } = await sb.from('animations').select('id').eq('project_id', doc.id);
-      if (anims?.length) await sb.from('animations').delete().in('id', (anims as { id: string }[]).map((a) => a.id));
+      const { data: anims } = await sb.from('animations').select('id').eq('project_id', doc.id).throwOnError();
+      if (anims?.length) await sb.from('animations').delete().in('id', (anims as { id: string }[]).map((a) => a.id)).throwOnError();
       for (const clip of doc.clips) {
         const { error } = await sb.from('animations').insert({
           id: clip.id, project_id: doc.id, scene_id: this.sceneId as string,
@@ -163,25 +189,36 @@ export class SyncEngine {
         });
         if (error) throw error;
         for (const t of clip.tracks) {
-          await sb.from('animation_tracks').insert({ id: t.id, animation_id: clip.id, object_id: t.objectId, property: t.property });
+          await sb.from('animation_tracks').insert({ id: t.id, animation_id: clip.id, object_id: t.objectId, property: t.property }).throwOnError();
           if (t.keyframes.length) {
             await sb.from('keyframes').insert(
               t.keyframes.map((k) => ({ track_id: t.id, frame: k.frame, value: [...k.value], interp: k.interp })),
-            );
+            ).throwOnError();
           }
         }
       }
 
-      // thumbnail
+      // Mark the cloud revision only AFTER every durable write has succeeded.
+      let thumbnailUrl: string | undefined;
       if (doc.thumbnail) {
-        const blob = await (await fetch(doc.thumbnail)).blob();
-        await sb.storage.from('thumbnails').upload(`${doc.id}/thumb.jpg`, blob, { upsert: true, contentType: 'image/jpeg' });
+        const response = await fetch(doc.thumbnail);
+        if (!response.ok) throw new Error('Could not read the project thumbnail.');
+        const blob = await response.blob();
+        const path = `${doc.id}/thumb.jpg`;
+        const { error } = await sb.storage.from('thumbnails').upload(path, blob, { upsert: true, contentType: 'image/jpeg' });
+        if (error) throw error;
+        thumbnailUrl = sb.storage.from('thumbnails').getPublicUrl(path).data.publicUrl;
       }
+      await sb.from('projects').update({ name: doc.name, version: doc.version, thumbnail_url: thumbnailUrl })
+        .eq('id', doc.id).select('id').single().throwOnError();
       doc.cloudVersion = doc.version;
+      this.session.syncError.set(null);
       return true;
     } catch (e) {
       console.warn('cloud push failed, queueing', e);
-      await localDb.enqueue({ id: uid(), projectId: doc.id, kind: 'push', payload: JSON.parse(JSON.stringify(doc)), createdAt: nowIso(), attempts: 0 });
+      this.session.syncError.set(cloudErrorMessage(e));
+      // One current snapshot per project, not an unbounded duplicate on every retry.
+      await localDb.enqueue({ id: `push:${doc.id}`, projectId: doc.id, kind: 'push', payload: doc, createdAt: nowIso(), attempts: 0 });
       return false;
     }
   }
@@ -192,26 +229,27 @@ export class SyncEngine {
     if (!u || u.guest) return localDb.getProject(projectId);
     try {
       const sb = supabase();
-      const { data: proj, error } = await sb.from('projects').select('*').eq('id', projectId).single();
-      if (error || !proj) return localDb.getProject(projectId);
-      const p = proj as { id: string; name: string; mode: ProjectMode; owner_id: string; version: number; updated_at: string };
-      const { data: scene } = await sb.from('scenes').select('id,data').eq('project_id', projectId).limit(1).maybeSingle();
+      const { data: proj, error } = await sb.from('projects').select('*').eq('id', projectId).single().throwOnError();
+      if (error) throw error;
+      if (!proj) return localDb.getProject(projectId);
+      const p = proj as { id: string; name: string; mode: ProjectMode; owner_id: string; thumbnail_url?: string | null; version: number; updated_at: string };
+      const { data: scene } = await sb.from('scenes').select('id,data').eq('project_id', projectId).limit(1).maybeSingle().throwOnError();
       const sceneId = (scene as { id: string } | null)?.id ?? null;
       const sceneData = ((scene as { data?: Record<string, unknown> } | null)?.data ?? {}) as Record<string, unknown>;
       const cloudSettings = (sceneData.settings ?? null) as ProjectDoc['settings'] | null;
       let objects: SceneObjectData[] = [];
       if (sceneId) {
-        const { data } = await sb.from('scene_objects').select('*').eq('scene_id', sceneId);
+        const { data } = await sb.from('scene_objects').select('*').eq('scene_id', sceneId).throwOnError();
         objects = ((data ?? []) as Record<string, never>[]).map((r) => SyncEngine.rowToObject(r as unknown as Record<string, unknown>));
       }
-      const { data: mats } = await sb.from('materials').select('*').eq('project_id', projectId);
-      const { data: anims } = await sb.from('animations').select('*').eq('project_id', projectId);
+      const { data: mats } = await sb.from('materials').select('*').eq('project_id', projectId).throwOnError();
+      const { data: anims } = await sb.from('animations').select('*').eq('project_id', projectId).throwOnError();
       const clips: ProjectDoc['clips'] = [];
       for (const a of (anims ?? []) as Record<string, unknown>[]) {
-        const { data: tracks } = await sb.from('animation_tracks').select('*').eq('animation_id', a.id as string);
+        const { data: tracks } = await sb.from('animation_tracks').select('*').eq('animation_id', a.id as string).throwOnError();
         const clipTracks: ProjectDoc['clips'][number]['tracks'] = [];
         for (const t of (tracks ?? []) as Record<string, unknown>[]) {
-          const { data: keys } = await sb.from('keyframes').select('*').eq('track_id', t.id as string).order('frame');
+          const { data: keys } = await sb.from('keyframes').select('*').eq('track_id', t.id as string).order('frame').throwOnError();
           clipTracks.push({
             id: t.id as string,
             objectId: (t.object_id as string) ?? '',
@@ -225,11 +263,11 @@ export class SyncEngine {
         }
         clips.push({ id: a.id as string, name: (a.name as string) ?? 'Clip', fps: (a.fps as number) ?? 30, length: (a.length_frames as number) ?? 90, tracks: clipTracks });
       }
-      const { data: assets } = await sb.from('assets').select('*').eq('project_id', projectId);
+      const { data: assets } = await sb.from('assets').select('*').eq('project_id', projectId).throwOnError();
       const local = await localDb.getProject(projectId);
       return {
         id: p.id, name: p.name, mode: p.mode, ownerId: p.owner_id,
-        thumbnail: local?.thumbnail ?? null,
+        thumbnail: local?.thumbnail ?? p.thumbnail_url ?? null,
         objects,
         settings: cloudSettings ?? local?.settings ?? { envIntensity: 1, shadows: true },
         materials: ((mats ?? []) as Record<string, unknown>[]).map((m) => ({
@@ -243,7 +281,7 @@ export class SyncEngine {
           mapAssetId: (m.map_asset_id as string) ?? null,
           updatedAt: (m.updated_at as string) ?? nowIso(),
         })),
-        clips: clips.length ? clips : local?.clips ?? [],
+        clips,
         assets: ((assets ?? []) as Record<string, unknown>[]).map((a) => ({
           id: a.id as string, name: (a.name as string) ?? 'asset', kind: ((a.kind as string) ?? 'other') as 'model' | 'texture' | 'other',
           mime: (a.mime as string) ?? '', size: Number(a.size_bytes ?? 0),
@@ -287,12 +325,15 @@ export class SyncEngine {
   }
 
   async flushQueue(): Promise<void> {
-    if (!this.ready()) return;
+    if (!this.ready() || this.session.pendingRecovery) return;
     const ops = await localDb.listQueue(this.session.doc.id);
     if (!ops.length) return;
-    // queue stores full snapshots; push the latest
-    const latest = ops[ops.length - 1];
-    const ok = await this.pushDoc(latest.payload as ProjectDoc);
+    // IndexedDB returns primary-key order, NOT chronological order. Prefer the
+    // current local document when offline edits are newer than a queued snapshot.
+    const latest = [...ops].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[ops.length - 1];
+    const queued = latest.payload as ProjectDoc;
+    const current = this.session.doc;
+    const ok = await this.pushDoc(queued.updatedAt > current.updatedAt ? queued : current);
     if (ok) await localDb.clearQueue(ops.map((o) => o.id));
   }
 
@@ -314,7 +355,7 @@ export class SyncEngine {
       await sb.from('assets').upsert({
         id: assetId, project_id: doc.id, name, kind,
         mime, size_bytes: buf.byteLength, storage_path: path,
-      });
+      }).throwOnError();
       const meta = doc.assets.find((a) => a.id === assetId);
       if (meta) meta.storagePath = path;
     } catch (e) {
@@ -348,7 +389,7 @@ export class SyncEngine {
   private subscribe(): void {
     const me = this.session.user();
     this.channel = supabase()
-      .channel(`project:${this.session.doc.id}`, { config: { broadcast: { self: false }, presence: { key: me.id } } })
+      .channel(`project:${this.session.doc.id}`, { config: { private: true, broadcast: { self: false }, presence: { key: me.id } } })
       .on('broadcast', { event: 'transform' }, ({ payload }) => {
         const m = payload as TransformMsg;
         if (m.actor === me.id) return;
@@ -416,7 +457,7 @@ export class SyncEngine {
   }
 
   broadcastTransform(o: SceneObjectData): void {
-    if (!this.channel) return;
+    if (!this.channel || !this.session.canEdit.get()) return;
     const me = this.session.user();
     void this.channel.send({
       type: 'broadcast', event: 'transform',
@@ -425,17 +466,17 @@ export class SyncEngine {
   }
 
   broadcastOp(op: OpMsg['op'], data: OpMsg['data']): void {
-    if (!this.channel) return;
+    if (!this.channel || !this.session.canEdit.get()) return;
     void this.channel.send({ type: 'broadcast', event: 'ops', payload: { op, data, actor: this.session.user().id } satisfies OpMsg });
   }
 
   broadcastMaterial(m: MaterialData): void {
-    if (!this.channel) return;
+    if (!this.channel || !this.session.canEdit.get()) return;
     void this.channel.send({ type: 'broadcast', event: 'material', payload: { data: m, actor: this.session.user().id } });
   }
 
   broadcastLock(objectId: string, name: string | null, acquire: boolean): void {
-    if (!this.channel) return;
+    if (!this.channel || !this.session.canEdit.get()) return;
     const me = this.session.user();
     void this.channel.send({
       type: 'broadcast', event: 'lock',

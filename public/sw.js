@@ -1,40 +1,54 @@
-// Web 3D Studio service worker — app shell only, network-first for navigations.
-const CACHE = 'w3ds-shell-v1';
-const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon.svg'];
+// Only this app's directory/cache is managed: other Pages sites share the origin.
+const SCOPE = self.registration.scope;
+const PREFIX = `w3ds-shell:${SCOPE}:`;
+const CACHE = `${PREFIX}v2`;
+const INDEX = new URL('index.html', SCOPE).href;
+const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon.svg'].map((path) => new URL(path, SCOPE).href);
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()).catch(() => undefined),
+self.addEventListener('install', (event) => {
+  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((key) => key.startsWith(PREFIX) && key !== CACHE).map((key) => caches.delete(key))))
+      .then(() => self.clients.claim()),
   );
 });
 
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()),
-  );
-});
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+  const url = new URL(request.url);
+  if (request.method !== 'GET' || url.origin !== self.location.origin || !url.href.startsWith(SCOPE)) return;
 
-self.addEventListener('fetch', (e) => {
-  const { request } = e;
-  if (request.method !== 'GET' || !request.url.startsWith(self.location.origin)) return;
   if (request.mode === 'navigate') {
-    e.respondWith(
-      fetch(request).catch(() => caches.match('./index.html').then((r) => r || fetch(request))),
-    );
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE);
+      try {
+        const response = await fetch(request);
+        if (response.ok) {
+          // Refresh the offline shell after a deploy, not only when sw.js changes.
+          event.waitUntil(cache.put(INDEX, response.clone()).catch(() => undefined));
+        }
+        return response;
+      } catch {
+        return (await cache.match(INDEX)) || Response.error();
+      }
+    })());
     return;
   }
-  e.respondWith(
-    caches.match(request).then(
-      (hit) =>
-        hit ||
-        fetch(request).then((res) => {
-          // cache immutable build assets only
-          if (res.ok && request.url.includes('/assets/')) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(request, copy)).catch(() => undefined);
-          }
-          return res;
-        }),
-    ),
-  );
+
+  const isBuildAsset = url.href.startsWith(new URL('assets/', SCOPE).href);
+  if (!isBuildAsset && !SHELL.includes(url.href)) return;
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const hit = await cache.match(request);
+    if (hit) return hit;
+    const response = await fetch(request);
+    if (response.ok && isBuildAsset) {
+      event.waitUntil(cache.put(request, response.clone()).catch(() => undefined));
+    }
+    return response;
+  })());
 });
