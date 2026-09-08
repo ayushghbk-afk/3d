@@ -168,6 +168,24 @@ describe('AI panel', () => {
     await vi.waitFor(() => expect(tabBody().querySelector('.ai-msg-assistant')?.textContent).toContain("Couldn't reach"));
   });
 
+  it('ask errors offer a shortcut button into Setup', async () => {
+    const session = fakeSession();
+    openAiPanel(session, 'ask');
+    await vi.waitFor(() => expect(document.querySelector('#aiask-go')).not.toBeNull());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    );
+    (tabBody().querySelector('#aiask-q') as HTMLInputElement).value = 'write a poem about cubes';
+    (tabBody().querySelector('#aiask-go') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(tabBody().querySelector('#aiask-setup')).not.toBeNull());
+    (tabBody().querySelector('#aiask-setup') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(tabBody().querySelector('#ai-pollkey')).not.toBeNull());
+    expect(tabBody().querySelector('a[href="https://enter.pollinations.ai/keys"]')).not.toBeNull();
+  });
+
   it('saves the Pollinations key from Setup', async () => {
     const session = fakeSession();
     openAiPanel(session, 'settings');

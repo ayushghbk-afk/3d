@@ -10,7 +10,7 @@ import {
   aiSettings, createAgentToken, flushAiSettings, loadAiSettings, revokeAgentToken, updateAiSettings,
 } from '../ai/settings.js';
 import { generateImageSmart, generateMeshSmart, getChatProvider, getImageProvider, getMeshProvider } from '../ai/factory.js';
-import { texturePrompt } from '../ai/pollinations.js';
+import { PollinationsChatProvider, texturePrompt } from '../ai/pollinations.js';
 import { getAgent, getRelay } from '../ai/index.js';
 import { answerLocally } from '../ai/local-answer.js';
 import type { AgentContext } from '../ai/agent-api.js';
@@ -512,7 +512,7 @@ function shortReason(e: unknown): string {
 
 function renderAskTab(session: EditorSession, body: HTMLElement): void {
   body.innerHTML = `
-    <div class="banner banner-info">Ask about <b>${escapeHtml(session.doc.name)}</b> — the free assistant reads the live scene summary (objects, materials, clips) before answering.</div>
+    <div class="banner banner-info">Ask about <b>${escapeHtml(session.doc.name)}</b> — the assistant reads the live scene summary before answering. Needs the free Pollinations key (⚙️ Setup tab, ~1 min); counts, lists and summaries answer offline regardless.</div>
     <div id="aiask-log" class="ai-chat"></div>
     <div class="row-between">
       <input id="aiask-q" class="input" placeholder="e.g. How many lights are in my scene?" style="flex:1" />
@@ -547,9 +547,21 @@ function renderAskTab(session: EditorSession, body: HTMLElement): void {
     } catch (e) {
       // Cloud AI unreachable → still answer factual scene questions offline.
       const local = answerLocally(session.doc, q);
-      (log.lastChild as HTMLElement).textContent = local
-        ? `📴 Offline answer (free AI unreachable: ${shortReason(e)}):\n\n${local}`
-        : `Error: ${(e as Error).message}`;
+      if (local) {
+        (log.lastChild as HTMLElement).textContent = `📴 Offline answer (free AI unreachable: ${shortReason(e)}):\n\n${local}`;
+      } else {
+        (log.lastChild as HTMLElement).textContent = `Error: ${(e as Error).message}`;
+        // Funnel straight to the fix: the key field in the Setup tab.
+        if (!log.querySelector('#aiask-setup')) {
+          const wrap = document.createElement('div');
+          wrap.innerHTML = '<button class="btn btn-sm btn-primary" id="aiask-setup">🔑 Add free Pollinations key</button>';
+          (wrap.querySelector('#aiask-setup') as HTMLButtonElement).onclick = () => {
+            const root = body.closest('.ai-panel') as HTMLElement | null;
+            if (root) renderTabs(session, root, 'settings');
+          };
+          log.appendChild(wrap);
+        }
+      }
     } finally {
       go.disabled = false;
     }
@@ -827,7 +839,7 @@ function renderSettingsTab(body: HTMLElement): void {
     </div>`;
 
   body.innerHTML = `
-    <div class="banner banner-info">Defaults are <b>100% free, no keys</b>. Point any slot at your own endpoint (OpenAI-compatible, Ollama, LM Studio, …) to override it. Keys stay in this browser's IndexedDB.</div>
+    <div class="banner banner-info">Textures and 3D default to <b>free, no-key</b> providers. Ask needs a <b>free Pollinations key</b> below (Pollinations ended anonymous text access). Point any slot at your own endpoint (OpenAI-compatible, Ollama, LM Studio, …) to override it. Keys stay in this browser's IndexedDB.</div>
     ${customBlock('ai-assistant', '💬 Assistant (Ask + ai.ask)', 'Pollinations free', s.assistantProvider, 'pollinations', s.assistantCustom, 'https://api.openai.com/v1', 'gpt-4o-mini', 'POST {base}/chat/completions')}
     ${customBlock('ai-image', '🎨 Textures & images', 'Pollinations Flux free', s.imageProvider, 'pollinations', s.imageCustom, 'https://api.openai.com/v1', 'dall-e-3', 'POST {base}/images/generations')}
     <div class="panel-sub">🧊 3D models</div>
@@ -854,9 +866,17 @@ function renderSettingsTab(body: HTMLElement): void {
     <label class="field">Hugging Face token (optional, shorter queues on both Spaces — free at huggingface.co)
       <input id="ai-hf" class="input" type="password" placeholder="hf_…" value="${escapeHtml(s.hfToken)}" />
     </label>
-    <label class="field">Pollinations key (optional — makes Ask + textures use your quota via the current API when the anonymous tier is blocked or throttled; free at enter.pollinations.ai/keys)
+    <label class="field">Pollinations key (required for Ask — free at <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noreferrer">enter.pollinations.ai/keys</a>; also raises texture limits)
       <input id="ai-pollkey" class="input" type="password" placeholder="sk_…" value="${escapeHtml(s.pollinationsKey)}" />
     </label>
+    <div class="row-between">
+      <span class="small muted">Paste key → Save, then Test.</span>
+      <span>
+        <a class="btn btn-sm" href="https://enter.pollinations.ai/keys" target="_blank" rel="noreferrer">Get a free key ↗</a>
+        <button class="btn btn-sm" id="ai-pollkey-test">Test</button>
+      </span>
+    </div>
+    <p class="small" id="ai-pollkey-test-out"></p>
     <div class="row-between" style="margin-top:12px">
       <button class="btn btn-ghost" id="ai-reset">Reset to free defaults</button>
       <button class="btn btn-primary" id="ai-save">Save</button>
@@ -935,4 +955,10 @@ function renderSettingsTab(body: HTMLElement): void {
     void testBtn('ai-image', () => (getImageProvider().test?.() ?? Promise.resolve('No test for this provider.')));
   (body.querySelector('#ai-mesh-test') as HTMLButtonElement).onclick = () =>
     void testBtn('ai-mesh', () => (getMeshProvider().test?.() ?? Promise.resolve('No test for this provider.')));
+  (body.querySelector('#ai-pollkey-test') as HTMLButtonElement).onclick = () =>
+    void testBtn('ai-pollkey', () => {
+      const key = read('ai-pollkey');
+      if (!key) return Promise.resolve('Paste a key first (free at enter.pollinations.ai/keys).');
+      return new PollinationsChatProvider(undefined, key).test();
+    });
 }

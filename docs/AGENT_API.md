@@ -16,7 +16,9 @@ undo/redo, viewport updates and realtime sync.
 - **Free texture generator:** Pollinations Flux — text → texture → material map.
   No signup, no key (~1 image / 15s on the anonymous tier).
 - **Free assistant:** Pollinations text (OpenAI-compatible) for the Ask tab and
-  `ai.ask`. No signup, no key.
+  `ai.ask`. Needs a free key from enter.pollinations.ai/keys (paste in
+  ✨ AI → Setup) — Pollinations ended anonymous text access; factual scene
+  questions still answer offline without one.
 - **Custom API:** point any slot (assistant / image / 3D) at your own
   OpenAI-compatible endpoint + key in ✨ AI → Setup. Keys stay in this
   browser's IndexedDB and are only ever sent to the endpoint you configured.
@@ -255,5 +257,6 @@ unless `strict` is set.
 | Relay `TIMEOUT` | App tab open? Relay connected (green)? Long generations need bigger `timeoutMs`. |
 | Free 3D stuck on “waking…” | The HF Space sleeps when idle; first boot takes 1–3 min. Retry, or add a free `hf_…` token / use offline/custom 3D. |
 | Free texture 429 / slow | Anonymous Pollinations ≈ 1 req / 15s — wait and retry. |
-| Ask / `ai.ask` “Couldn't reach…” | The browser can't reach `*.pollinations.ai`: allow it in your ad-blocker/VPN/firewall, check DNS, or retry later. Adding a free Pollinations key (✨ AI → Setup) switches Ask to the current keyed API; a custom assistant endpoint also works. Counts/lists/summaries still answer offline. |
+| Ask / `ai.ask` “ended anonymous access (402)” | Pollinations now requires a key for text: get a free one at enter.pollinations.ai/keys → ✨ AI → Setup → Pollinations key → Save → Test. A custom assistant endpoint (OpenAI, Ollama, …) also works. Counts/lists/summaries still answer offline. |
+| Ask / `ai.ask` “Couldn't reach…” (no 402) | The browser can't reach `*.pollinations.ai`: allow it in your ad-blocker/VPN/firewall, check DNS, or retry later. The free key above also routes around most anonymous-tier blocks. |
 | Custom API CORS errors | The endpoint must allow browser calls (`Access-Control-Allow-Origin`). Local Ollama/LM Studio work; some clouds need a proxy. |

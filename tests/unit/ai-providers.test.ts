@@ -272,6 +272,35 @@ describe('pollinations chat chain', () => {
     }
   });
 
+  it('explains HTTP 402 as anonymous access ended, pointing at the free key', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('pay up', { status: 402 }))
+        .mockResolvedValueOnce(new Response('pay up', { status: 402 }))
+        .mockResolvedValueOnce(new Response('unauthorized', { status: 401 })),
+    );
+    try {
+      await new PollinationsChatProvider().chat([{ role: 'user', content: 'hi' }]);
+      throw new Error('should have thrown');
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain('ended anonymous access');
+      expect(msg).toContain('enter.pollinations.ai/keys');
+      expect(msg).toContain('Setup');
+      expect(msg).not.toContain('ad-blocker');
+    }
+  });
+
+  it('tells keyed users when their own budget is exhausted (402)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('exhausted', { status: 402 })));
+    // Keyed POST 402s; the anonymous fallbacks 402/401 too.
+    await expect(new PollinationsChatProvider(undefined, 'sk_test').chat([{ role: 'user', content: 'hi' }])).rejects.toThrow(
+      /out of budget/,
+    );
+  });
+
   it('reports offline browsers distinctly', () => {
     vi.stubGlobal('navigator', { onLine: false });
     expect(unreachableChatError(['a: b']).message).toContain('offline');

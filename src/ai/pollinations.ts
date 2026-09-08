@@ -115,13 +115,26 @@ export function flattenMessages(messages: AgentMessage[]): string {
 
 /**
  * Actionable error when every chat endpoint failed. Distinguishes offline
- * browsers from blocked/throttled hosts so the user knows what to try next.
+ * browsers, exhausted anonymous access (HTTP 402 → key required) and generic
+ * network blocks so the user knows exactly what to try next.
  */
 export function unreachableChatError(failures: string[]): Error {
   const nav = globalThis.navigator as { onLine?: boolean } | undefined;
   if (nav && nav.onLine === false) {
     return new Error(
       'You appear to be offline — reconnect and try Ask again. Factual scene questions (counts, lists) are answered offline in the meantime.',
+    );
+  }
+  if (failures.some((f) => f.startsWith('gen.pollinations.ai (key)') && f.includes('402'))) {
+    return new Error(
+      'Your Pollinations key is out of budget (HTTP 402). Check usage/balance at enter.pollinations.ai and top up or wait for the reset — then retry Ask.',
+    );
+  }
+  if (failures.some((f) => f.includes('402'))) {
+    return new Error(
+      'Pollinations ended anonymous access for Ask (HTTP 402 — the free tier now needs a key). ' +
+        'Fix in ~1 min: get a free key at enter.pollinations.ai/keys, paste it in ✨ AI → Setup → Pollinations key, Save, then ask again. ' +
+        'Factual scene questions (counts, lists, summaries) still get offline answers.',
     );
   }
   return new Error(
