@@ -33,6 +33,43 @@ export function attachToParent(
   if (obj.parent !== parent) parent.add(obj);
 }
 
+/**
+ * Selection highlight: tints the selected object's materials blue, restoring
+ * the previous emissive on (de)select. Exported pure for unit tests.
+ *
+ * The base snapshot MUST be guarded by `=== undefined`: the default emissive
+ * is black (0x000000, falsy), and a falsy check re-snapshots the blue
+ * highlight itself as the "base" — so deselecting never restores the color.
+ */
+export function applyOutline(objects: Map<string, THREE.Object3D>, id: string | null): void {
+  objects.forEach((obj, key) => {
+    const on = key === id;
+    obj.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      mats.forEach((m) => {
+        const std = m as THREE.MeshStandardMaterial;
+        if (!('emissive' in std)) return;
+        if (std.userData.baseEmissive === undefined) {
+          std.userData.baseEmissive = std.emissive.getHex();
+          std.userData.baseEmissiveIntensity = std.emissiveIntensity;
+        }
+        std.userData.highlighted = on;
+        // NOTE: shared materials — highlight affects all users; acceptable V1,
+        // replaced by outline-pass in Phase 7.
+        if (on) {
+          std.emissive.setHex(0x2266ff);
+          std.emissiveIntensity = Math.max(0.35, std.userData.baseEmissiveIntensity as number);
+        } else {
+          std.emissive.setHex(std.userData.baseEmissive as number);
+          std.emissiveIntensity = std.userData.baseEmissiveIntensity as number;
+        }
+      });
+    });
+  });
+}
+
 export class Viewport {
   readonly caps: GpuCaps;
   readonly renderer: THREE.WebGLRenderer;
@@ -389,31 +426,7 @@ export class Viewport {
   }
 
   outline(id: string | null): void {
-    this.objects.forEach((obj, key) => {
-      const on = key === id;
-      obj.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (!mesh.isMesh) return;
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        mats.forEach((m) => {
-          const std = m as THREE.MeshStandardMaterial;
-          if (!('emissive' in std)) return;
-          if (!std.userData.baseEmissive) {
-            std.userData.baseEmissive = std.emissive.getHex();
-            std.userData.baseEmissiveIntensity = std.emissiveIntensity;
-          }
-          // NOTE: shared materials — highlight affects all users; acceptable V1,
-          // replaced by outline-pass in Phase 7.
-          if (on) {
-            std.emissive.setHex(0x2266ff);
-            std.emissiveIntensity = Math.max(0.35, std.userData.baseEmissiveIntensity as number);
-          } else {
-            std.emissive.setHex(std.userData.baseEmissive as number);
-            std.emissiveIntensity = std.userData.baseEmissiveIntensity as number;
-          }
-        });
-      });
-    });
+    applyOutline(this.objects, id);
   }
 
   captureThumbnail(maxSize = 320): string | null {
