@@ -69,6 +69,37 @@ Device Flow uses GitHub's OAuth endpoints, whose browser CORS restrictions can
 prevent direct use from a static Pages site; do not assume a client ID alone
 removes that restriction.
 
+## AI & Agent API
+
+Editor → **✨ AI** opens AI Studio:
+
+- **🧊 3D Model** — free text-to-3D (Stable Fast 3D via Hugging Face, no key;
+  TripoSR fallback), with an offline primitive mockup when AI is unreachable.
+- **🎨 Texture** — free text-to-texture (Pollinations Flux, no key) applied to
+  any material.
+- **🖌️ Paint** — the AI looks at your groups to identify each model and its
+  parts, then auto-paints, AI-textures or tidies the whole scene at once.
+- **💬 Ask** — project-grounded Q&A over the live scene summary (needs the
+  free Pollinations key in Setup; counts, lists and summaries keep working
+  offline regardless).
+- **🤖 Agent API** — let an AI agent list projects and make changes (objects,
+  materials, textures, models, keyframes) via in-page JS, `postMessage`,
+  `BroadcastChannel`, or real HTTP through `npm run agent-relay`.
+- **⚙️ Setup** — point the assistant, image or 3D slot at your own
+  OpenAI-compatible endpoint + key. Keys never leave the browser.
+
+**[Full spec: connection methods, auth, method reference, custom APIs →](docs/AGENT_API.md)**
+
+## Movable interface
+
+- **✨ AI Studio** is a floating window: drag it by the title bar, resize it by
+  the corner, collapse it to a bar, or toggle it with the **✨ AI** button (or
+  the `A` key) to reveal the 3D scene. Its position and size are remembered.
+- **Outliner, inspector and timeline** resize by dragging their edges and
+  collapse via the arrow button or double-click; the layout is remembered.
+- **Every dialog** (menus, GitHub, members, shortcuts…) drags by its title bar
+  and resizes by its corner.
+
 ## Scripts
 
 | Command | Purpose |
@@ -80,9 +111,11 @@ removes that restriction.
 | `npm run preview:pages` | Plain static `/3d/` preview (:4174) |
 | `npm run test:pages` | Playwright production smoke tests; install Chromium first |
 | `npm run supabase:setup` | Regenerate the one-paste fresh database setup SQL |
+| `npm run agent-relay` | Local HTTP relay so external agents can call the Agent API |
 
 ## Docs
 
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — required dashboard settings and live checks.
+- [`docs/AGENT_API.md`](docs/AGENT_API.md) — Agent API, free/custom AI setup, relay server.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture and phase tracker.
 - [`supabase/migrations/`](supabase/migrations/) — canonical cloud schema and policies.

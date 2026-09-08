@@ -30,8 +30,14 @@ export class MaterialManager {
     mat.color.set(m.baseColor);
     mat.metalness = m.metalness;
     mat.roughness = m.roughness;
-    mat.emissive.set(m.emissive);
-    mat.emissiveIntensity = m.emissiveIntensity;
+    // Keep the selection-highlight snapshot fresh, but never paint over an
+    // active highlight (e.g. editing materials while an object is selected).
+    mat.userData.baseEmissive = new THREE.Color(m.emissive).getHex();
+    mat.userData.baseEmissiveIntensity = m.emissiveIntensity;
+    if (!mat.userData.highlighted) {
+      mat.emissive.set(m.emissive);
+      mat.emissiveIntensity = m.emissiveIntensity;
+    }
     mat.opacity = m.opacity;
     mat.transparent = m.transparent || m.opacity < 1;
     mat.envMapIntensity = this.envIntensity;

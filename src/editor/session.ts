@@ -76,6 +76,8 @@ export class EditorSession {
     normalizeDoc(doc);
     viewport.syncMaterials(doc.materials);
     for (const o of doc.objects) viewport.addObject(o);
+    // Children listed before their parents were parked at the root — attach now.
+    viewport.fixParenting(doc.objects);
     this.applySettings();
 
     this.gizmo = new TransformGizmo(viewport.scene, viewport.camera, viewport.renderer.domElement);
@@ -482,6 +484,10 @@ export class EditorSession {
       if (!local) {
         this.doc.objects.push(incoming);
         this.viewport.addObject(incoming);
+        // A child may have arrived before its parent — attach it now.
+        for (const o of this.doc.objects) {
+          if (o.parentId === incoming.id) this.viewport.updateObject(o);
+        }
         if (incoming.type === 'imported' && incoming.assetId) void this.attachAsset(incoming);
       } else if (incoming.version >= local.version) {
         Object.assign(local, JSON.parse(JSON.stringify(incoming)) as SceneObjectData);
@@ -533,6 +539,44 @@ export class EditorSession {
     this.viewport.updateObject(o);
     this.markDirty('material');
     this.sync.broadcastOp('update', o);
+  }
+
+  /** Single-undo-step bulk paint used by AI auto-paint (dedupes materials). */
+  applyPaint(
+    items: { objectId: string; materialName: string; patch: Partial<MaterialData> }[],
+  ): { objectId: string; materialId: string }[] {
+    if (!items.length) return [];
+    this.history.checkpoint(this.doc, 'AI auto-paint');
+    const byKey = new Map<string, MaterialData>();
+    const applied: { objectId: string; materialId: string }[] = [];
+    for (const it of items) {
+      const key = JSON.stringify(it.patch);
+      let mat = byKey.get(key);
+      if (!mat) {
+        mat = defaultMaterial(it.materialName.slice(0, 60));
+        Object.assign(mat, it.patch, { updatedAt: nowIso() });
+        this.doc.materials.push(mat);
+        byKey.set(key, mat);
+        this.sync.broadcastMaterial(mat);
+      }
+      const o = this.doc.objects.find((x) => x.id === it.objectId);
+      if (o && this.canEditObject(it.objectId)) {
+        o.materialId = mat.id;
+        o.version++;
+        this.sync.broadcastOp('update', o);
+      }
+      applied.push({ objectId: it.objectId, materialId: mat.id });
+    }
+    normalizeDoc(this.doc);
+    this.viewport.syncMaterials(this.doc.materials);
+    for (const o of this.doc.objects) this.viewport.updateObject(o);
+    this.markDirty('material');
+    return applied;
+  }
+
+  /** Public undo checkpoint for bulk agent operations. */
+  checkpoint(label: string): void {
+    this.history.checkpoint(this.doc, label);
   }
 
   // ---------- GLB assets ----------
@@ -903,6 +947,7 @@ export class EditorSession {
     this.viewport.clearAll();
     this.viewport.syncMaterials(this.doc.materials);
     for (const o of this.doc.objects) this.viewport.addObject(o);
+    this.viewport.fixParenting(this.doc.objects);
     for (const o of this.doc.objects) {
       if (o.type === 'imported' && o.assetId) void this.attachAsset(o);
     }

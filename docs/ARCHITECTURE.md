@@ -78,6 +78,21 @@ editor/
 github/
   github.ts     PAT + Device-Flow auth, repo/branch/tree APIs, blob upload,
                 import detection, export commit builder
+ai/
+  agent-api.ts  AgentAPI: 30 methods (projects/objects/materials/assets/clips/
+                history/AI), token auth + scopes + rate limits + audit log;
+                live EditorSession or headless IndexedDB mutations
+  bridge.ts     transports: window.Web3DStudio + postMessage + BroadcastChannel
+  relay.ts      browser long-poll client for server/agent-relay.mjs (real HTTP)
+  settings.ts   provider + token settings (on-device IndexedDB, VITE_AI_* defaults)
+  factory.ts    provider wiring with custom → free → offline fallbacks
+  pollinations.ts  FREE image/texture (Flux) + assistant chat, no key
+  gradio.ts     shared Gradio Space client (config/upload/queue/SSE/download)
+  sf3d.ts       FREE text→3D (Stable Fast 3D Space, best quality, default)
+  triposr.ts    FREE text→3D fallback (TripoSR Space, faster)
+  custom.ts     user OpenAI-compatible chat/image/3D endpoints
+  procedural.ts offline fallbacks: canvas textures + primitive 3D plans
+server/agent-relay.mjs  zero-dep localhost HTTP relay for external agents
 ui/
   router, toast, dashboard, editor shell, outliner, inspector, toolbar,
   timeline, modals, github-modal
@@ -174,5 +189,8 @@ workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 - [ ] Phase 5 — animation: graph editor, GLB clip import, retarget basics.
 - [ ] Phase 6 — modeling: half-edge ops, bevel/loopcut/knife/mirror/subdiv.
 - [ ] Phase 7 — workers/wasm/UV/paint/LOD/node materials.
-- [ ] Phase 8 — GitHub: PR export, repo templates, AI-agent webhook.
+- [x] Phase 8 (agent/API slice) — AI Studio: free Stable Fast 3D (+TripoSR fallback) + Pollinations textures,
+      custom OpenAI-compatible endpoints, Agent API (page/postMessage/channel/relay),
+      token auth + audit log, offline fallbacks. Remaining: PR export, repo templates.
+- [ ] Phase 8 — GitHub: PR export, repo templates.
 - [ ] Phase 9 — perf/a11y/i18n/docs pass.
