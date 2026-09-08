@@ -289,7 +289,7 @@ export class Viewport {
     this.applyTransform(obj, data);
     obj.visible = data.visible;
     const mesh = obj as THREE.Mesh;
-    if (mesh.isMesh && data.type !== 'imported' && data.type !== 'group' && data.type !== 'light') {
+    if (mesh.isMesh && data.type !== 'imported' && data.type !== 'group') {
       const mat = this.materials.getById(data.materialId);
       if (mat && mesh.material !== mat) mesh.material = mat;
     }
