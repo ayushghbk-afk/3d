@@ -12,15 +12,15 @@ export interface DockLayout {
 }
 
 const STORE_KEY = 'w3d.layout.v1';
-const MIN_SIDE = 180;
-const MAX_SIDE = 520;
+const MIN_SIDE = 220;
+const MAX_SIDE = 560;
 const MIN_TL = 46;
 const MAX_TL = 420;
 
 export function defaultDockLayout(): DockLayout {
   return {
-    outlinerW: 264,
-    inspectorW: 264,
+    outlinerW: 280,
+    inspectorW: 320,
     timelineH: 168,
     outlinerHidden: false,
     inspectorHidden: false,

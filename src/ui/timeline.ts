@@ -25,23 +25,23 @@ export function buildTimeline(s: EditorSession, el: HTMLElement, togglePlay: () 
         <select id="tl-clip" class="input input-sm" aria-label="Clip">
           ${s.doc.clips.map((c) => `<option value="${c.id}"${c.id === clip.id ? ' selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
         </select>
-        <button class="btn btn-sm" data-tl="addclip" title="New clip">＋</button>
-        <button class="btn btn-icon btn-sm" data-tl="stop" title="Stop">⏹</button>
-        <button class="btn btn-icon btn-sm" data-tl="play" title="Play/Pause (Space)">${st.playing ? '⏸' : '▶'}</button>
-        <button class="btn btn-icon btn-sm ${s.autoKey.get() ? 'rec-on' : ''}" data-tl="rec" title="Auto-key (record): transform edits write keyframes">⏺</button>
-        <button class="btn btn-icon btn-sm" data-tl="prevkey" title="Previous keyframe">⏮</button>
-        <button class="btn btn-icon btn-sm" data-tl="nextkey" title="Next keyframe">⏭</button>
+        <button class="btn btn-sm" data-tl="addclip" title="New clip">New clip</button>
+        <button class="btn btn-sm" data-tl="stop" title="Stop playback">⏹ Stop</button>
+        <button class="btn btn-sm" data-tl="play" title="Play/Pause (Space)">${st.playing ? '⏸ Pause' : '▶ Play'}</button>
+        <button class="btn btn-sm ${s.autoKey.get() ? 'rec-on' : ''}" data-tl="rec" title="Auto-key (record): transform edits write keyframes">⏺ Auto-key</button>
+        <button class="btn btn-sm" data-tl="prevkey" title="Previous keyframe">Prev key</button>
+        <button class="btn btn-sm" data-tl="nextkey" title="Next keyframe">Next key</button>
         <span class="tl-frame" title="Current frame">${st.frame} / ${clip.length}</span>
         <label class="tl-num">fps <input id="tl-fps" class="input input-sm" type="number" min="1" max="120" value="${clip.fps}" /></label>
         <label class="tl-num">len <input id="tl-len" class="input input-sm" type="number" min="1" max="2000" value="${clip.length}" /></label>
         <span class="spacer"></span>
         <span class="tl-hint muted">${escapeHtml(describeClip(clip))}</span>
-        <button class="btn btn-sm" data-tl="key-all" title="Keyframe all (selected)">◉ All</button>
-        <button class="btn btn-sm" data-tl="key" title="Keyframe position (selected)">◉ P</button>
-        <button class="btn btn-sm" data-tl="keyr" title="Keyframe rotation (selected)">◉ R</button>
-        <button class="btn btn-sm" data-tl="keys" title="Keyframe scale (selected)">◉ S</button>
-        <button class="btn btn-sm" data-tl="interp" title="Toggle linear/step at playhead">${s.interpAtPlayhead() === 'step' ? '▮ Step' : s.interpAtPlayhead() === 'linear' ? '∿ Linear' : '≋ Interp'}</button>
-        <button class="btn btn-sm" data-tl="keydel" title="Delete keyframe at playhead">✕ key</button>
+        <button class="btn btn-sm" data-tl="key-all" title="Keyframe all (selected)">Key all</button>
+        <button class="btn btn-sm" data-tl="key" title="Keyframe position (selected)">Key pos</button>
+        <button class="btn btn-sm" data-tl="keyr" title="Keyframe rotation (selected)">Key rot</button>
+        <button class="btn btn-sm" data-tl="keys" title="Keyframe scale (selected)">Key scale</button>
+        <button class="btn btn-sm" data-tl="interp" title="Toggle linear/step at playhead">${s.interpAtPlayhead() === 'step' ? 'Interpolation: Step' : s.interpAtPlayhead() === 'linear' ? 'Interpolation: Linear' : 'Interpolation'}</button>
+        <button class="btn btn-sm" data-tl="keydel" title="Delete keyframe at playhead">Delete key</button>
       </div>
       <div class="tl-ruler-wrap" style="display:${collapsed ? 'none' : 'block'}">
         <canvas id="tl-ruler" class="tl-ruler"></canvas>
@@ -105,11 +105,11 @@ export function buildTimeline(s: EditorSession, el: HTMLElement, togglePlay: () 
     const clip = activeClip(s.doc);
     if (frameEl && clip) frameEl.textContent = `${st.frame} / ${clip.length}`;
     const playBtn = el.querySelector('[data-tl="play"]');
-    if (playBtn) playBtn.textContent = st.playing ? '⏸' : '▶';
+    if (playBtn) playBtn.textContent = st.playing ? '⏸ Pause' : '▶ Play';
     const interpBtn = el.querySelector('[data-tl="interp"]');
     if (interpBtn) {
       const v = s.interpAtPlayhead();
-      interpBtn.textContent = v === 'step' ? '▮ Step' : v === 'linear' ? '∿ Linear' : '≋ Interp';
+      interpBtn.textContent = v === 'step' ? 'Interpolation: Step' : v === 'linear' ? 'Interpolation: Linear' : 'Interpolation';
     }
     const canvas = el.querySelector('#tl-ruler') as HTMLCanvasElement | null;
     if (canvas && clip) drawRuler(s, canvas, clip.length, st.frame);

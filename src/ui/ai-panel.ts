@@ -95,18 +95,31 @@ function wireSetupLink(scope: HTMLElement, session: EditorSession, root: HTMLEle
 
 function renderModelTab(session: EditorSession, body: HTMLElement): void {
   const s = aiSettings.get();
+  const examples = [
+    'a cute low-poly robot toy',
+    'a glossy sneaker for a product page',
+    'a floating sci-fi drone with blue lights',
+    'a cozy cartoon cabin for a tiny scene',
+  ];
   body.innerHTML = `
-    <div class="banner banner-info">Free text-to-3D: your prompt → reference image → <b>Stable Fast 3D</b> (Stability AI, game-ready meshes) → GLB imported into the scene. First run of the day can take 1–3 min while the free service wakes up. If a model is down it tries the next one automatically.</div>
-    ${providerBadge()}
+    <div class="ai-hero">
+      <span class="dash-kicker">Prompt-first 3D</span>
+      <h3>Describe the model you want to drop into the scene.</h3>
+      <p class="muted">Start with a short noun phrase, then refine the result in the editor.</p>
+    </div>
     <label class="field">Describe the model
-      <textarea id="ai3d-prompt" class="input" rows="2" placeholder="e.g. a cute low-poly robot toy"></textarea>
+      <textarea id="ai3d-prompt" class="input" rows="3" placeholder="e.g. a cute low-poly robot toy"></textarea>
     </label>
-    <div class="row-between">
+    <div class="ai-chip-row">
+      ${examples.map((example) => `<button class="btn btn-sm ai-chip-btn" data-ai-example="${escapeHtml(example)}">${escapeHtml(example)}</button>`).join('')}
+    </div>
+    ${providerBadge()}
+    <div class="settings-grid">
       <label class="field" style="flex:1">Name <input id="ai3d-name" class="input" placeholder="auto from prompt" /></label>
       <label class="field">Model
         <select id="ai3d-model" class="input">
-          <option value="sf3d" ${s.meshProvider === 'sf3d' ? 'selected' : ''}>Stable Fast 3D (best)</option>
-          <option value="triposr" ${s.meshProvider === 'triposr' ? 'selected' : ''}>TripoSR (faster)</option>
+          <option value="sf3d" ${s.meshProvider === 'sf3d' ? 'selected' : ''}>Stable Fast 3D</option>
+          <option value="triposr" ${s.meshProvider === 'triposr' ? 'selected' : ''}>TripoSR</option>
         </select>
       </label>
       <label class="field">Quality
@@ -117,6 +130,10 @@ function renderModelTab(session: EditorSession, body: HTMLElement): void {
         </select>
       </label>
     </div>
+    <details class="prop-details ai-how">
+      <summary>How this works</summary>
+      <p class="muted small">Your prompt becomes a reference image, then a 3D service turns it into a GLB and imports it into the scene. The free providers can take 1–3 minutes on their first run of the day; if one is asleep, the app tries the next option automatically.</p>
+    </details>
     <div id="ai3d-progress" class="ai-progress" hidden>
       <div class="ai-progress-bar"><div id="ai3d-bar"></div></div>
       <div id="ai3d-stage" class="small muted"></div>
@@ -135,6 +152,13 @@ function renderModelTab(session: EditorSession, body: HTMLElement): void {
   const nameEl = body.querySelector('#ai3d-name') as HTMLInputElement;
   const qualityEl = body.querySelector('#ai3d-quality') as HTMLSelectElement;
   const modelEl = body.querySelector('#ai3d-model') as HTMLSelectElement;
+  body.querySelectorAll<HTMLElement>('[data-ai-example]').forEach((btn) => {
+    btn.onclick = () => {
+      promptEl.value = btn.dataset.aiExample ?? '';
+      promptEl.focus();
+      promptEl.setSelectionRange(promptEl.value.length, promptEl.value.length);
+    };
+  });
   modelEl.onchange = () => {
     updateAiSettings((prev) => ({ ...prev, meshProvider: modelEl.value as 'sf3d' | 'triposr' }));
     toast(`3D model: ${modelEl.selectedOptions[0].textContent}`, 'success');
@@ -207,7 +231,7 @@ function renderModelTab(session: EditorSession, body: HTMLElement): void {
       } else {
         resultEl.innerHTML = `
           <div class="banner banner-warn">❌ <b>Generation failed.</b><br />${escapeHtml((e as Error).message)}
-          <br /><span class="small">Common fixes: wait 1–2 min and retry (the free Space sleeps when idle and its queue fills up), check the browser console for the failing stage, or open <a href="#" id="ai3d-err-setup">Setup</a> for offline/custom 3D.</span></div>`;
+          <br /><span class="small">Common fixes: wait 1–2 min and retry, check the browser console for the failing stage, or open <a href="#" id="ai3d-err-setup">Setup</a> for offline/custom 3D.</span></div>`;
         const setupLink = resultEl.querySelector('#ai3d-err-setup') as HTMLElement | null;
         setupLink?.addEventListener('click', (ev) => {
           ev.preventDefault();
