@@ -31,6 +31,7 @@ describe('answerLocally', () => {
     expect(answerLocally(doc, 'number of materials?')).toContain('2 materials'); // +1 seeded default
     expect(answerLocally(doc, 'how many groups?')).toContain('1 groups');
     expect(answerLocally(doc, 'count the clips')).toContain('2 animation clips'); // +1 seeded default
+    expect(answerLocally(doc, 'how many scripts?')).toContain('0 scene scripts');
   });
 
   it('lists objects, materials, lights and clips by name', () => {

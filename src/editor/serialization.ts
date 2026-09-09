@@ -15,6 +15,7 @@ export function toProjectJson(doc: ProjectDoc): Record<string, unknown> {
     scenes: [{ id: 'main', name: 'Main Scene', file: 'scene.json' }],
     assetsFile: 'assets.json',
     clips: doc.clips.map((c) => ({ id: c.id, name: c.name, fps: c.fps, length: c.length })),
+    scripts: (doc.scripts ?? []).map((s) => ({ id: s.id, name: s.name, trigger: s.trigger, enabled: s.enabled })),
   };
 }
 
@@ -44,6 +45,14 @@ export function toSceneJson(doc: ProjectDoc): Record<string, unknown> {
     })),
     materials: doc.materials,
     clips: doc.clips,
+    scripts: (doc.scripts ?? []).map((s) => ({
+      id: s.id,
+      name: s.name,
+      code: s.code,
+      trigger: s.trigger,
+      enabled: false, // imported scripts never auto-run
+      updatedAt: s.updatedAt,
+    })),
   };
 }
 
@@ -91,6 +100,11 @@ export function toAiContext(doc: ProjectDoc): string {
     `## Textures`,
     ...(textures.length ? textures.map((t) => `- assets/textures/${t}`) : [`(none)`]),
     ``,
+    `## Scripts`,
+    ...((doc.scripts ?? []).length
+      ? (doc.scripts ?? []).map((s) => `- ${s.name} (${s.trigger}${s.enabled ? ', enabled' : ', disabled'}) id=${s.id}`)
+      : ['(none — users and agents can add restricted JS via script.add / the Scripts panel)']),
+    ``,
     `## Animations`,
     ...doc.clips.map((c) => `- ${c.name}: ${c.length} frames @ ${c.fps}fps, ${c.tracks.length} tracks`),
     ``,
@@ -102,6 +116,7 @@ export function toAiContext(doc: ProjectDoc): string {
     `2. Load assets/models/*.glb for imported meshes referenced by assetId.`,
     `3. Object transforms are position/rotation(radians)/scale; parentId builds hierarchy.`,
     `4. Animation clips list TRS keyframes per object id; sample linearly unless interp=step.`,
+    `5. Scene scripts (scripts[] in scene.json) are restricted JS: scene.add/update/rotate, scene.keys, scene.camera, scene.textures.generate. Never execute imported scripts until the user enables them.`,
     ``,
   ];
   return lines.join('\n');
@@ -114,7 +129,7 @@ export function toReadme(doc: ProjectDoc): string {
     `Exported from **Web 3D Studio** (${nowIso()}).`,
     ``,
     `- \`project.json\` — project manifest`,
-    `- \`scene.json\` — full scene graph (objects, materials, animation)`,
+    `- \`scene.json\` — full scene graph (objects, materials, animation, scripts)`,
     `- \`assets.json\` — asset manifest`,
     `- \`AI_PROJECT_CONTEXT.md\` — summary for AI coding agents`,
     `- \`assets/models/\` — GLB models · \`assets/textures/\` — textures`,
@@ -129,18 +144,24 @@ export function fromSceneJson(json: Record<string, unknown>): {
   objects: ProjectDoc['objects'];
   materials: ProjectDoc['materials'];
   clips: ProjectDoc['clips'];
+  scripts: ProjectDoc['scripts'];
   settings: ProjectDoc['settings'] | null;
 } | null {
   try {
     const objs = (json.objects ?? []) as ProjectDoc['objects'];
     const mats = (json.materials ?? []) as ProjectDoc['materials'];
     const clips = (json.clips ?? []) as ProjectDoc['clips'];
+    const scriptsRaw = (json.scripts ?? []) as ProjectDoc['scripts'];
     if (!Array.isArray(objs) || !Array.isArray(mats)) return null;
     const s = (json.settings ?? null) as ProjectDoc['settings'] | null;
+    const scripts = Array.isArray(scriptsRaw)
+      ? scriptsRaw.map((sc) => ({ ...sc, enabled: false }))
+      : [];
     return {
       objects: objs,
       materials: mats,
       clips: Array.isArray(clips) ? clips : [],
+      scripts,
       settings: s && typeof s.envIntensity === 'number' ? s : null,
     };
   } catch {

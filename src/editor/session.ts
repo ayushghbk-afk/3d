@@ -7,9 +7,9 @@ import { Playback, activeClip, setKeyframe, deleteKeyframeAt, samplePose, trackV
 import { SyncEngine } from './sync.js';
 import { Store } from '../state/store.js';
 import {
-  defaultMaterial, defaultObject, defaultClip, createProjectDoc, normalizeDoc,
-  type AnimTrack, type LightData, type LightKind, type MaterialData, type ObjectType, type PrimitiveType,
-  type ProjectDoc, type ProjectMode, type SceneObjectData, type ShadingMode,
+  defaultMaterial, defaultObject, defaultClip, defaultScript, createProjectDoc, normalizeDoc,
+  type AnimTrack, type CameraState, type LightData, type LightKind, type MaterialData, type ObjectType, type PrimitiveType,
+  type ProjectDoc, type ProjectMode, type SceneObjectData, type SceneScript, type ScriptTrigger, type ShadingMode,
   type TransformMode, type CameraType, type PresenceUser,
 } from '../state/models.js';
 import { localDb } from '../lib/indexeddb.js';
@@ -17,6 +17,9 @@ import { auth } from '../lib/auth.js';
 import { cloudEnabled } from '../lib/supabase.js';
 import { cloudErrorMessage } from '../lib/cloud-errors.js';
 import { uid, nowIso, debounce, throttle, makeThumb } from '../lib/utils.js';
+import { generateImageSmart, generateMeshSmart } from '../ai/factory.js';
+import { texturePrompt } from '../ai/pollinations.js';
+import { ScriptEngine, SCRIPT_MAX_CODE, SCRIPT_MAX_COUNT, type ScriptHost, type ScriptRunResult } from './scripts.js';
 
 export type SaveState = 'saved' | 'saving' | 'local' | 'offline' | 'error';
 
@@ -25,13 +28,16 @@ export interface SessionNotice {
   msg: string;
 }
 
-export class EditorSession {
+export class EditorSession implements ScriptHost {
   doc: ProjectDoc;
   viewport: Viewport;
   gizmo: TransformGizmo;
   history = new History();
   playback: Playback;
   sync: SyncEngine;
+  scriptEngine: ScriptEngine;
+  readonly mode = 'live' as const;
+  canGenerate = true;
 
   // UI state slices (§44)
   selection = new Store<string | null>(null);
@@ -107,9 +113,6 @@ export class EditorSession {
       this.broadcastTransform(o);
     };
 
-    viewport.events.onSelect = (id) => this.select(id);
-    viewport.events.onFrame = (dt) => this.playback.tick(dt);
-
     this.playback = new Playback(
       () => activeClip(this.doc),
       (frame) => {
@@ -118,6 +121,15 @@ export class EditorSession {
         this.anim.set({ playing: this.playback.playing, frame, length: clip?.length ?? 90, fps: clip?.fps ?? 30 });
       },
     );
+    this.scriptEngine = new ScriptEngine(this);
+    viewport.events.onSelect = (id) => this.select(id);
+    viewport.events.onFrame = (dt) => {
+      this.playback.tick(dt);
+      this.scriptEngine.tick(dt, this.playback.playing, this.playback.frame);
+    };
+    if (doc.settings?.camera) {
+      try { viewport.setCameraState(doc.settings.camera); } catch { /* camera restore is best-effort */ }
+    }
 
     this.selection.subscribe((id) => {
       viewport.outline(id);
@@ -175,6 +187,7 @@ export class EditorSession {
     session.history.checkpoint(doc, 'Open');
     // drop the open checkpoint so undo starts empty
     session.history.clear();
+    void session.scriptEngine.runTrigger('open');
     return session;
   }
 
@@ -274,8 +287,16 @@ export class EditorSession {
     this.selection.set(id);
   }
 
+  selectedId(): string | null {
+    return this.selection.get();
+  }
+
+  persist(kind: string): void {
+    this.markDirty(kind);
+  }
+
   // ---------- object ops ----------
-  private addObject(type: ObjectType, name: string): SceneObjectData {
+  addObject(type: ObjectType, name: string): SceneObjectData {
     this.history.checkpoint(this.doc, `Add ${name}`);
     const o = defaultObject(type, this.uniqueName(name));
     if (type !== 'group' && type !== 'light' && type !== 'imported') {
@@ -340,10 +361,10 @@ export class EditorSession {
     this.sync.broadcastOp('delete', { id: target });
   }
 
-  duplicateObject(id?: string): void {
+  duplicateObject(id?: string): SceneObjectData | null {
     const target = id ?? this.selection.get();
     const src = target ? this.doc.objects.find((o) => o.id === target) : null;
-    if (!src) return;
+    if (!src) return null;
     this.history.checkpoint(this.doc, 'Duplicate');
     const copy: SceneObjectData = JSON.parse(JSON.stringify(src)) as SceneObjectData;
     copy.id = uid();
@@ -356,6 +377,7 @@ export class EditorSession {
     this.select(copy.id);
     this.markDirty('add');
     this.sync.broadcastOp('add', copy);
+    return copy;
   }
 
   renameObject(id: string, name: string): void {
@@ -395,6 +417,12 @@ export class EditorSession {
     this.viewport.updateObject(o);
     this.markDirty('edit');
     this.sync.broadcastOp('update', o);
+  }
+
+  setVisible(id: string, visible: boolean): void {
+    const o = this.doc.objects.find((x) => x.id === id);
+    if (!o || o.visible === visible) return;
+    this.toggleVisible(id);
   }
 
   toggleVisible(id: string): void {
@@ -511,9 +539,9 @@ export class EditorSession {
   }
 
   // ---------- materials ----------
-  addMaterial(): MaterialData {
+  addMaterial(name?: string): MaterialData {
     this.history.checkpoint(this.doc, 'Add material');
-    const m = defaultMaterial(`Material ${this.doc.materials.length + 1}`);
+    const m = defaultMaterial(name ?? `Material ${this.doc.materials.length + 1}`);
     this.doc.materials.push(m);
     this.viewport.syncMaterials(this.doc.materials);
     this.markDirty('material');
@@ -910,6 +938,164 @@ export class EditorSession {
     return null;
   }
 
+  addKeyframe(objectId: string, property: AnimTrack['property'], frame: number, value: [number, number, number]): void {
+    setKeyframe(this.doc, objectId, property, frame, value);
+    this.markDirty('animation');
+  }
+
+  deleteKeyframe(objectId: string, property: AnimTrack['property'], frame: number): void {
+    deleteKeyframeAt(this.doc, objectId, property, frame);
+    this.markDirty('animation');
+  }
+
+  play(): void {
+    this.playback.play();
+    this.syncAnim();
+  }
+  pause(): void {
+    this.playback.pause();
+    this.syncAnim();
+  }
+  stop(): void {
+    this.playback.stop();
+    this.syncAnim();
+  }
+  setFrame(n: number): void {
+    this.playback.setFrame(n);
+    this.syncAnim();
+  }
+  getPlayback(): { playing: boolean; frame: number; length: number; fps: number } {
+    return this.anim.get();
+  }
+  private syncAnim(): void {
+    const clip = activeClip(this.doc);
+    this.anim.set({ playing: this.playback.playing, frame: this.playback.frame, length: clip?.length ?? 90, fps: clip?.fps ?? 30 });
+  }
+
+  getCamera(): CameraState {
+    return this.viewport.getCameraState();
+  }
+  setCamera(patch: Partial<CameraState>, persist = true): void {
+    this.viewport.setCameraState(patch);
+    if (patch.type) this.cameraType.set(this.viewport.cameraType);
+    if (persist) {
+      this.doc.settings.camera = this.viewport.getCameraState();
+      this.markDirty('camera');
+    }
+  }
+  orbitCamera(azimuthDeg: number, polarDeg: number, distance?: number): void {
+    this.viewport.orbitCamera(azimuthDeg, polarDeg, distance);
+  }
+  focus(id: string | null): void {
+    this.viewport.focus(id);
+  }
+
+  addScript(patch?: Partial<SceneScript>): SceneScript {
+    if (this.doc.scripts.length >= SCRIPT_MAX_COUNT) {
+      throw new Error(`At most ${SCRIPT_MAX_COUNT} scripts per project.`);
+    }
+    this.history.checkpoint(this.doc, 'Add script');
+    const s = defaultScript(patch?.name ?? `Script ${this.doc.scripts.length + 1}`);
+    if (typeof patch?.code === 'string') s.code = patch.code.slice(0, SCRIPT_MAX_CODE);
+    if (patch?.trigger) s.trigger = patch.trigger;
+    if (typeof patch?.enabled === 'boolean') s.enabled = patch.enabled;
+    this.doc.scripts.push(s);
+    this.markDirty('script');
+    return s;
+  }
+
+  updateScript(id: string, patch: Partial<Pick<SceneScript, 'name' | 'code' | 'enabled' | 'trigger'>>): SceneScript {
+    const s = this.doc.scripts.find((x) => x.id === id);
+    if (!s) throw new Error(`Script ${id} not found.`);
+    this.history.checkpoint(this.doc, 'Edit script', 800);
+    if (typeof patch.name === 'string' && patch.name.trim()) s.name = patch.name.trim().slice(0, 80);
+    if (typeof patch.code === 'string') {
+      s.code = patch.code.slice(0, SCRIPT_MAX_CODE);
+      this.scriptEngine.invalidate(id);
+    }
+    if (typeof patch.enabled === 'boolean') s.enabled = patch.enabled;
+    if (patch.trigger) {
+      if (!(['manual', 'open', 'play', 'frame'] as ScriptTrigger[]).includes(patch.trigger)) {
+        throw new Error('trigger must be manual, open, play or frame.');
+      }
+      s.trigger = patch.trigger;
+    }
+    s.updatedAt = nowIso();
+    this.markDirty('script');
+    return s;
+  }
+
+  deleteScript(id: string): void {
+    const i = this.doc.scripts.findIndex((x) => x.id === id);
+    if (i < 0) return;
+    this.history.checkpoint(this.doc, 'Delete script');
+    this.doc.scripts.splice(i, 1);
+    this.scriptEngine.invalidate(id);
+    this.markDirty('script');
+  }
+
+  async runScript(id: string): Promise<ScriptRunResult> {
+    const s = this.doc.scripts.find((x) => x.id === id);
+    if (!s) throw new Error(`Script ${id} not found.`);
+    this.history.checkpoint(this.doc, `Run ${s.name}`);
+    return this.scriptEngine.run(s, { allowHeavy: true, frame: this.playback.frame, time: this.scriptEngine.time });
+  }
+
+  async runAdhoc(code: string): Promise<ScriptRunResult> {
+    this.history.checkpoint(this.doc, 'Run script');
+    return this.scriptEngine.run({ id: 'adhoc', name: 'Ad hoc', code }, { allowHeavy: true, frame: this.playback.frame, time: this.scriptEngine.time });
+  }
+
+  async generateTexture(
+    prompt: string,
+    opts: { materialId?: string; objectId?: string; size?: number; seamless?: boolean } = {},
+  ): Promise<{ materialId: string; provider: string; seed: number }> {
+    const size = Math.max(64, Math.min(1024, opts.size ?? 512));
+    const { result } = await generateImageSmart(texturePrompt(prompt, opts.seamless !== false), { width: size, height: size });
+    let matId = opts.materialId;
+    if (matId) {
+      if (!this.doc.materials.some((m) => m.id === matId)) throw new Error(`Material ${matId} not found.`);
+    } else {
+      const mat = this.addMaterial(prompt.slice(0, 32) || 'AI texture');
+      matId = mat.id;
+    }
+    const file = new File([result.blob], `${prompt.slice(0, 40) || 'texture'}.png`, { type: result.mime });
+    await this.uploadTexture(matId, file);
+    if (opts.objectId) this.assignMaterial(opts.objectId, matId);
+    return { materialId: matId, provider: result.provider, seed: result.seed };
+  }
+
+  async generateModel(
+    prompt: string,
+    opts: { name?: string; quality?: 'fast' | 'balanced' | 'high' } = {},
+  ): Promise<{ objectId?: string; objectIds?: string[]; provider: string }> {
+    const name = opts.name ?? prompt.slice(0, 40) ?? 'AI model';
+    const outcome = await generateMeshSmart(prompt, { quality: opts.quality ?? 'balanced' });
+    if (outcome.kind === 'glb') {
+      const obj = await this.importGlbBytes(name, outcome.result.glb.slice(0), `${name}.glb`);
+      if (!obj) throw new Error('The generated file was not a valid 3D model.');
+      return { objectId: obj.id, provider: outcome.result.provider };
+    }
+    const objectIds: string[] = [];
+    for (const part of outcome.parts) {
+      const created = part.kind === 'group' ? this.addGroup() : this.addPrimitive(part.kind as PrimitiveType);
+      this.renameObject(created.id, part.name);
+      this.setTransform(
+        created.id,
+        { x: part.position[0], y: part.position[1], z: part.position[2] },
+        undefined,
+        part.scale ? { x: part.scale[0], y: part.scale[1], z: part.scale[2] } : undefined,
+      );
+      if (part.color) {
+        const mat = this.addMaterial(`${part.name} color`);
+        this.updateMaterial(mat.id, { name: `${part.name} color`, baseColor: part.color });
+        this.assignMaterial(created.id, mat.id);
+      }
+      objectIds.push(created.id);
+    }
+    return { objectIds, provider: 'procedural-mesh' };
+  }
+
   private applyPose(frame: number): void {
     const clip = activeClip(this.doc);
     if (!clip) return;
@@ -932,11 +1118,13 @@ export class EditorSession {
   // ---------- undo/redo ----------
   undo(): void {
     if (!this.history.undo(this.doc)) return;
+    this.scriptEngine.invalidate();
     this.rebuildFromDoc();
     this.markDirty('undo');
   }
   redo(): void {
     if (!this.history.redo(this.doc)) return;
+    this.scriptEngine.invalidate();
     this.rebuildFromDoc();
     this.markDirty('undo');
   }
@@ -957,12 +1145,14 @@ export class EditorSession {
     void this.hydrateTextures();
   }
 
-  restoreSnapshot(snapshot: { objects: ProjectDoc['objects']; materials: ProjectDoc['materials']; clips: ProjectDoc['clips'] }, label: string): void {
+  restoreSnapshot(snapshot: { objects: ProjectDoc['objects']; materials: ProjectDoc['materials']; clips: ProjectDoc['clips']; scripts?: ProjectDoc['scripts'] }, label: string): void {
     this.history.checkpoint(this.doc, `Restore ${label}`);
     this.doc.objects = JSON.parse(JSON.stringify(snapshot.objects)) as ProjectDoc['objects'];
     this.doc.materials = JSON.parse(JSON.stringify(snapshot.materials)) as ProjectDoc['materials'];
     this.doc.clips = JSON.parse(JSON.stringify(snapshot.clips)) as ProjectDoc['clips'];
+    if (snapshot.scripts) this.doc.scripts = JSON.parse(JSON.stringify(snapshot.scripts)) as ProjectDoc['scripts'];
     normalizeDoc(this.doc);
+    this.scriptEngine.invalidate();
     this.rebuildFromDoc();
     this.applySettings();
     this.markDirty('restore');

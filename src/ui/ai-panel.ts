@@ -9,7 +9,7 @@ import { closeFloatWin, getFloatWin, openFloatWin } from './floatwin.js';
 import {
   aiSettings, createAgentToken, flushAiSettings, loadAiSettings, revokeAgentToken, updateAiSettings,
 } from '../ai/settings.js';
-import { generateImageSmart, generateMeshSmart, getChatProvider, getImageProvider, getMeshProvider } from '../ai/factory.js';
+import { chatSmart, generateImageSmart, generateMeshSmart, getChatProvider, getImageProvider, getMeshProvider } from '../ai/factory.js';
 import { PollinationsChatProvider, texturePrompt } from '../ai/pollinations.js';
 import { getAgent, getRelay } from '../ai/index.js';
 import { answerLocally } from '../ai/local-answer.js';
@@ -255,7 +255,7 @@ function renderTextureTab(session: EditorSession, body: HTMLElement): void {
   const s = aiSettings.get();
   const mats = session.doc.materials;
   body.innerHTML = `
-    <div class="banner banner-info">Free text-to-texture (<b>Pollinations Flux</b>, no key): describe a surface and it is applied as the material's base-color map. Anonymous tier ≈ 1 image / 15s.</div>
+    <div class="banner banner-info">Free text-to-texture (<b>Pollinations Flux</b>, no key): describe a surface and it is applied as the material's base-color map. AI can drive this from the <b>Agent API</b> (<code>texture.generate</code>) and the dedicated <b>Texture API</b> (<code>window.Web3DStudio.textures</code>). Anonymous tier ≈ 1 image / 15s.</div>
     ${providerBadge()}
     <label class="field">Describe the texture
       <textarea id="aitex-prompt" class="input" rows="2" placeholder="e.g. rusty corrugated metal"></textarea>
@@ -332,9 +332,8 @@ function renderTextureTab(session: EditorSession, body: HTMLElement): void {
       await session.uploadTexture(matId, file);
       barEl.style.width = '100%';
       const url = URL.createObjectURL(result.blob);
-      resultEl.innerHTML = `
-        <div class="banner banner-info">✅ Texture applied to <b>${escapeHtml(session.doc.materials.find((m) => m.id === matId)?.name ?? 'material')}</b> (via ${escapeHtml(result.provider)}, seed ${result.seed}).${fallback ? `<br />Fallback: ${escapeHtml(fallback.to)} — ${escapeHtml(fallback.reason)}` : ''}</div>
-        <img src="${url}" class="ai-preview" alt="Generated texture preview" />`;
+      const matName = session.doc.materials.find((m) => m.id === matId)?.name ?? 'material';
+      resultEl.innerHTML = `<div class="banner banner-info">✅ Texture applied to <b>${escapeHtml(matName)}</b> (via ${escapeHtml(result.provider)}, seed ${result.seed}).${fallback ? `<br />Fallback: ${escapeHtml(fallback.to)} — ${escapeHtml(fallback.reason)}` : ''}</div><img src="${url}" class="ai-preview" alt="Generated texture preview" />`;
       toast('Texture applied', 'success');
     } catch (e) {
       if ((e as Error)?.name === 'AbortError') resultEl.innerHTML = '<p class="muted">Cancelled.</p>';
@@ -546,7 +545,7 @@ function shortReason(e: unknown): string {
 
 function renderAskTab(session: EditorSession, body: HTMLElement): void {
   body.innerHTML = `
-    <div class="banner banner-info">Ask about <b>${escapeHtml(session.doc.name)}</b> — the assistant reads the live scene summary before answering. Needs the free Pollinations key (⚙️ Setup tab, ~1 min); counts, lists and summaries answer offline regardless.</div>
+    <div class="banner banner-info">Ask about <b>${escapeHtml(session.doc.name)}</b> — Groq Llama (no key) reads the live scene summary. Counts, lists and summaries answer offline if the proxy is unreachable.</div>
     <div id="aiask-log" class="ai-chat"></div>
     <div class="row-between">
       <input id="aiask-q" class="input" placeholder="e.g. How many lights are in my scene?" style="flex:1" />
@@ -570,9 +569,8 @@ function renderAskTab(session: EditorSession, body: HTMLElement): void {
     push('user', q);
     push('assistant', '…');
     try {
-      const chat = getChatProvider();
       const context = toAiContext(session.doc).slice(0, 6000);
-      const answer = await chat.chat([
+      const answer = await chatSmart([
         { role: 'system', content: `You are the Web 3D Studio assistant. Answer briefly using this live project summary. Suggest concrete Agent API calls when relevant.\n\n${context}` },
         { role: 'user', content: q },
       ]);
@@ -588,7 +586,7 @@ function renderAskTab(session: EditorSession, body: HTMLElement): void {
         // Funnel straight to the fix: the key field in the Setup tab.
         if (!log.querySelector('#aiask-setup')) {
           const wrap = document.createElement('div');
-          wrap.innerHTML = '<button class="btn btn-sm btn-primary" id="aiask-setup">🔑 Add free Pollinations key</button>';
+          wrap.innerHTML = '<button class="btn btn-sm btn-primary" id="aiask-setup">⚙️ Open Setup</button>';
           (wrap.querySelector('#aiask-setup') as HTMLButtonElement).onclick = () => {
             const root = body.closest('.ai-panel') as HTMLElement | null;
             if (root) renderTabs(session, root, 'settings');
@@ -614,7 +612,7 @@ function renderAgentTab(body: HTMLElement): void {
   const s = aiSettings.get();
   const agent = getAgent();
   body.innerHTML = `
-    <div class="banner banner-info">Let an AI agent drive this app: list projects, add/edit objects, materials, textures, 3D models and keyframes — from DevTools, an extension, another tab, or real HTTP via the relay server. <b>Keys never leave this device.</b></div>
+    <div class="banner banner-info">Two APIs, same token: <b>Agent API</b> (<code>window.Web3DStudio.agent</code>) edits objects, scripts, keyframes and camera; <b>Texture API</b> (<code>window.Web3DStudio.textures</code>) generates and applies maps. Scene <b>Scripts</b> (toolbar / J) let you or the AI run restricted JS on any mesh. <b>Keys never leave this device.</b></div>
     <label class="small"><input type="checkbox" id="ag-enabled" ${s.agent.enabled ? 'checked' : ''} /> <b>Enable Agent API</b></label>
     <div class="panel-sub">Connection status</div>
     <div id="ag-status" class="small"></div>
@@ -873,8 +871,34 @@ function renderSettingsTab(body: HTMLElement): void {
     </div>`;
 
   body.innerHTML = `
-    <div class="banner banner-info">Textures and 3D default to <b>free, no-key</b> providers. Ask needs a <b>free Pollinations key</b> below (Pollinations ended anonymous text access). Point any slot at your own endpoint (OpenAI-compatible, Ollama, LM Studio, …) to override it. Keys stay in this browser's IndexedDB.</div>
-    ${customBlock('ai-assistant', '💬 Assistant (Ask + ai.ask)', 'Pollinations free', s.assistantProvider, 'pollinations', s.assistantCustom, 'https://api.openai.com/v1', 'gpt-4o-mini', 'POST {base}/chat/completions')}
+    <div class="banner banner-info">Ask defaults to <b>Groq Llama</b> via a no-key proxy. Textures and 3D stay on free no-key providers. Point any slot at your own endpoint (OpenAI-compatible, Ollama, LM Studio, …) to override it. Keys stay in this browser's IndexedDB.</div>
+    <div class="panel-sub">💬 Assistant (Ask + ai.ask)</div>
+    <div class="radio-row">
+      <label><input type="radio" name="ai-assistant-prov" value="groq" ${s.assistantProvider === 'groq' ? 'checked' : ''} /> Groq Llama (default, no key)</label>
+      <label><input type="radio" name="ai-assistant-prov" value="pollinations" ${s.assistantProvider === 'pollinations' ? 'checked' : ''} /> Pollinations</label>
+      <label><input type="radio" name="ai-assistant-prov" value="custom" ${s.assistantProvider === 'custom' ? 'checked' : ''} /> Custom API</label>
+    </div>
+    <div id="ai-groq-opts" ${s.assistantProvider === 'groq' ? '' : 'hidden'}>
+      <label class="field">Groq proxy URL <input id="ai-groq-url" class="input" value="${escapeHtml(s.groqProxyUrl)}" /></label>
+      <label class="field">Model <input id="ai-groq-model" class="input" placeholder="llama-3.3-70b-versatile" value="${escapeHtml(s.groqModel)}" /></label>
+      <div class="row-between">
+        <span class="small muted">POST OpenAI chat completions. Keys stay on the worker.</span>
+        <button class="btn btn-sm" id="ai-assistant-test">Test</button>
+      </div>
+      <p class="small" id="ai-assistant-test-out"></p>
+    </div>
+    <div id="ai-assistant-custom" ${s.assistantProvider === 'custom' ? '' : 'hidden'}>
+      <label class="field">Base URL <input id="ai-assistant-url" class="input" placeholder="https://api.openai.com/v1" value="${escapeHtml(s.assistantCustom.baseUrl)}" /></label>
+      <div class="row-between">
+        <label class="field" style="flex:1">API key <input id="ai-assistant-key" class="input" type="password" placeholder="sk-…" value="${escapeHtml(s.assistantCustom.apiKey)}" /></label>
+        <label class="field">Model <input id="ai-assistant-model" class="input" placeholder="gpt-4o-mini" value="${escapeHtml(s.assistantCustom.model)}" /></label>
+      </div>
+      <div class="row-between">
+        <span class="small muted">POST {base}/chat/completions</span>
+        <button class="btn btn-sm" id="ai-assistant-test-custom">Test</button>
+      </div>
+      <p class="small" id="ai-assistant-test-out-custom"></p>
+    </div>
     ${customBlock('ai-image', '🎨 Textures & images', 'Pollinations Flux free', s.imageProvider, 'pollinations', s.imageCustom, 'https://api.openai.com/v1', 'dall-e-3', 'POST {base}/images/generations')}
     <div class="panel-sub">🧊 3D models</div>
     <div class="radio-row">
@@ -900,7 +924,7 @@ function renderSettingsTab(body: HTMLElement): void {
     <label class="field">Hugging Face token (optional, shorter queues on both Spaces — free at huggingface.co)
       <input id="ai-hf" class="input" type="password" placeholder="hf_…" value="${escapeHtml(s.hfToken)}" />
     </label>
-    <label class="field">Pollinations key (required for Ask — free at <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noreferrer">enter.pollinations.ai/keys</a>; also raises texture limits)
+    <label class="field">Pollinations key (optional Ask fallback + higher texture limits — free at <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noreferrer">enter.pollinations.ai/keys</a>)
       <input id="ai-pollkey" class="input" type="password" placeholder="sk_…" value="${escapeHtml(s.pollinationsKey)}" />
     </label>
     <div class="row-between">
@@ -918,7 +942,12 @@ function renderSettingsTab(body: HTMLElement): void {
 
   const toggleCustom = (prefix: string): void => {
     const checked = (body.querySelector(`input[name="${prefix}-prov"]:checked`) as HTMLInputElement)?.value;
-    (body.querySelector(`#${prefix}-custom`) as HTMLElement).hidden = checked !== 'custom';
+    const custom = body.querySelector(`#${prefix}-custom`) as HTMLElement | null;
+    if (custom) custom.hidden = checked !== 'custom';
+    if (prefix === 'ai-assistant') {
+      const groq = body.querySelector('#ai-groq-opts') as HTMLElement | null;
+      if (groq) groq.hidden = checked !== 'groq';
+    }
   };
   for (const prefix of ['ai-assistant', 'ai-image', 'ai-mesh']) {
     body.querySelectorAll(`input[name="${prefix}-prov"]`).forEach((r) => {
@@ -928,14 +957,17 @@ function renderSettingsTab(body: HTMLElement): void {
 
   const read = (id: string): string => (body.querySelector(`#${id}`) as HTMLInputElement).value.trim();
   const save = async (): Promise<void> => {
-    const picked = (name: string, free: string): 'pollinations' | 'custom' | 'triposr' | 'sf3d' => {
+    const picked = (name: string, free: string): 'pollinations' | 'custom' | 'triposr' | 'sf3d' | 'groq' => {
       const v = (body.querySelector(`input[name="${name}"]:checked`) as HTMLInputElement)?.value;
       if (name === 'ai-mesh-prov') return (v === 'custom' || v === 'triposr' ? v : 'sf3d') as 'sf3d' | 'triposr' | 'custom';
-      return (v === 'custom' ? 'custom' : free) as 'pollinations' | 'custom' | 'triposr' | 'sf3d';
+      if (name === 'ai-assistant-prov') return (v === 'custom' || v === 'pollinations' ? v : 'groq') as 'groq' | 'pollinations' | 'custom';
+      return (v === 'custom' ? 'custom' : free) as 'pollinations' | 'custom' | 'triposr' | 'sf3d' | 'groq';
     };
     updateAiSettings((prev) => ({
       ...prev,
-      assistantProvider: picked('ai-assistant-prov', 'pollinations') as 'pollinations' | 'custom',
+      assistantProvider: picked('ai-assistant-prov', 'groq') as 'groq' | 'pollinations' | 'custom',
+      groqProxyUrl: read('ai-groq-url') || prev.groqProxyUrl,
+      groqModel: read('ai-groq-model') || prev.groqModel,
       assistantCustom: { baseUrl: read('ai-assistant-url'), apiKey: read('ai-assistant-key'), model: read('ai-assistant-model') || 'default' },
       imageProvider: picked('ai-image-prov', 'pollinations') as 'pollinations' | 'custom',
       imageCustom: { baseUrl: read('ai-image-url'), apiKey: read('ai-image-key'), model: read('ai-image-model') || 'default' },
@@ -960,6 +992,8 @@ function renderSettingsTab(body: HTMLElement): void {
     updateAiSettings((prev) => ({
       ...prev,
       assistantProvider: d.assistantProvider,
+      groqProxyUrl: d.groqProxyUrl,
+      groqModel: d.groqModel,
       assistantCustom: d.assistantCustom,
       imageProvider: d.imageProvider,
       imageCustom: d.imageCustom,
@@ -983,8 +1017,19 @@ function renderSettingsTab(body: HTMLElement): void {
       out.textContent = `❌ ${(e as Error).message}`;
     }
   };
-  (body.querySelector('#ai-assistant-test') as HTMLButtonElement).onclick = () =>
-    void testBtn('ai-assistant', () => (getChatProvider().test?.() ?? Promise.resolve('No test for this provider.')));
+  (body.querySelector('#ai-assistant-test') as HTMLButtonElement | null)?.addEventListener('click', () =>
+    void testBtn('ai-assistant', () => (getChatProvider().test?.() ?? Promise.resolve('No test for this provider.'))),
+  );
+  (body.querySelector('#ai-assistant-test-custom') as HTMLButtonElement | null)?.addEventListener('click', async () => {
+    const out = body.querySelector('#ai-assistant-test-out-custom') as HTMLElement;
+    out.textContent = 'Testing…';
+    try {
+      await save();
+      out.textContent = `✅ ${await (getChatProvider().test?.() ?? Promise.resolve('No test for this provider.'))}`;
+    } catch (e) {
+      out.textContent = `❌ ${(e as Error).message}`;
+    }
+  });
   (body.querySelector('#ai-image-test') as HTMLButtonElement).onclick = () =>
     void testBtn('ai-image', () => (getImageProvider().test?.() ?? Promise.resolve('No test for this provider.')));
   (body.querySelector('#ai-mesh-test') as HTMLButtonElement).onclick = () =>

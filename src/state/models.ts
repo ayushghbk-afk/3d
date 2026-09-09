@@ -10,6 +10,8 @@ export type TransformMode = 'translate' | 'rotate' | 'scale';
 export type CameraType = 'perspective' | 'orthographic';
 export type SelectionMode = 'object' | 'vertex' | 'edge' | 'face';
 export type LightKind = 'point' | 'directional' | 'spot' | 'ambient' | 'hemisphere';
+/** When a project script runs. `frame` = every viewport tick (keep it cheap). */
+export type ScriptTrigger = 'manual' | 'open' | 'play' | 'frame';
 
 export interface Vec3 {
   x: number;
@@ -99,9 +101,28 @@ export interface AssetMeta {
   createdAt: string;
 }
 
+export interface CameraState {
+  type: CameraType;
+  position: Vec3;
+  target: Vec3;
+  fov: number;
+}
+
+export interface SceneScript {
+  id: string;
+  name: string;
+  /** Restricted JavaScript. Receives `scene`, `Math`, `dt`, `time`, `frame`. */
+  code: string;
+  enabled: boolean;
+  trigger: ScriptTrigger;
+  updatedAt: string;
+}
+
 export interface ProjectSettings {
   envIntensity: number; // 0..2 environment lighting strength
   shadows: boolean; // global shadow maps toggle
+  /** Last script/API camera pose (viewport still lets the user orbit). */
+  camera?: CameraState | null;
 }
 
 export interface ProjectDoc {
@@ -114,6 +135,7 @@ export interface ProjectDoc {
   materials: MaterialData[];
   clips: AnimClip[];
   assets: AssetMeta[];
+  scripts: SceneScript[];
   activeClipId: string | null;
   settings: ProjectSettings;
   updatedAt: string;
@@ -192,7 +214,38 @@ export function defaultClip(name = 'Clip 1'): AnimClip {
 }
 
 export function defaultSettings(): ProjectSettings {
-  return { envIntensity: 1, shadows: true };
+  return { envIntensity: 1, shadows: true, camera: null };
+}
+
+export function defaultCamera(): CameraState {
+  return {
+    type: 'perspective',
+    position: v3(4, 3, 6),
+    target: v3(),
+    fov: 50,
+  };
+}
+
+export const SCRIPT_STARTER = `// Restricted JS: scene, Math, dt, time, frame.
+// Control any mesh, keyframes, camera, materials — and call AI generate.
+const o = scene.selected() || scene.get('Cube');
+if (!o) {
+  scene.log('Select a mesh, or add one: scene.add({ kind: "cube", name: "Cube" })');
+} else {
+  scene.rotate(o.id, { y: 45 });
+  scene.log('Rotated ' + o.name);
+}
+`;
+
+export function defaultScript(name = 'Script'): SceneScript {
+  return {
+    id: uid(),
+    name,
+    code: SCRIPT_STARTER,
+    enabled: false,
+    trigger: 'manual',
+    updatedAt: nowIso(),
+  };
 }
 
 export function createProjectDoc(name: string, mode: ProjectMode, ownerId: string): ProjectDoc {
@@ -208,6 +261,7 @@ export function createProjectDoc(name: string, mode: ProjectMode, ownerId: strin
     materials: [mat],
     clips: [clip],
     assets: [],
+    scripts: [],
     activeClipId: clip.id,
     settings: defaultSettings(),
     updatedAt: nowIso(),
@@ -363,6 +417,16 @@ export function normalizeDoc(doc: ProjectDoc): ProjectDoc {
   }
   for (const a of doc.assets) {
     if (a.thumb === undefined) a.thumb = null;
+  }
+  if (!Array.isArray(doc.scripts)) doc.scripts = [];
+  const TRIGGERS: ScriptTrigger[] = ['manual', 'open', 'play', 'frame'];
+  for (const s of doc.scripts) {
+    if (!s.id) s.id = uid();
+    if (typeof s.name !== 'string' || !s.name.trim()) s.name = 'Script';
+    if (typeof s.code !== 'string') s.code = '';
+    if (typeof s.enabled !== 'boolean') s.enabled = false;
+    if (!TRIGGERS.includes(s.trigger)) s.trigger = 'manual';
+    if (typeof s.updatedAt !== 'string') s.updatedAt = nowIso();
   }
   return doc;
 }

@@ -2,7 +2,12 @@
 
 Let an AI agent connect to Web 3D Studio and **make changes in projects**:
 list projects, add/edit/delete objects, materials, textures, AI-generated 3D
-models, animation keyframes, history and saves.
+models, animation keyframes, camera pose, scene scripts, history and saves.
+
+Two in-page APIs share the same tokens:
+
+- `window.Web3DStudio.agent` — full Agent API (`object.*`, `script.*`, `camera.*`, …)
+- `window.Web3DStudio.textures` — dedicated texture generator (`generate`, `list`, `apply`)
 
 The app is a static page (GitHub Pages, no server), so the API runs
 **in the browser** and offers four ways to connect. Everything works
@@ -15,10 +20,9 @@ undo/redo, viewport updates and realtime sync.
   scene. No signup, no key. TripoSR is the automatic fallback if SF3D is busy.
 - **Free texture generator:** Pollinations Flux — text → texture → material map.
   No signup, no key (~1 image / 15s on the anonymous tier).
-- **Free assistant:** Pollinations text (OpenAI-compatible) for the Ask tab and
-  `ai.ask`. Needs a free key from enter.pollinations.ai/keys (paste in
-  ✨ AI → Setup) — Pollinations ended anonymous text access; factual scene
-  questions still answer offline without one.
+- **Free assistant:** Groq Llama (`llama-3.3-70b-versatile`) via
+  `https://groq-proxy.mr-hackerdon808.workers.dev/` — no browser key. Ask and
+  `ai.ask` use it first, then Pollinations, then offline scene answers.
 - **Custom API:** point any slot (assistant / image / 3D) at your own
   OpenAI-compatible endpoint + key in ✨ AI → Setup. Keys stay in this
   browser's IndexedDB and are only ever sent to the endpoint you configured.
@@ -182,6 +186,15 @@ Omit `projectId` to target the open project (live), or pass one from
 | `clip.add` | write | `{projectId?, name?}` |
 | `keyframe.add` | write | `{projectId?, objectId, property?, frame?, value?, clipId?}` |
 | `keyframe.delete` | write | `{projectId?, objectId, property?, frame}` |
+| `camera.get` | read | `{projectId?}` → `{type, position, target, fov}` |
+| `camera.set` | write | `{projectId?, position?, target?, fov?, type?}` |
+| `camera.lookAt` | write | `{projectId?, target?}` or `{x,y,z}` |
+| `camera.orbit` | write | `{projectId?, azimuthDeg, polarDeg, distance?}` |
+| `camera.focus` | write | `{projectId?, objectId?}` (live editor) |
+| `playback.get` / `playback.set` | read / write | playhead; `set` is live-only `{playing?, frame?}` |
+| `script.list` / `script.get` | read | scene scripts (restricted JS) |
+| `script.add` / `script.update` / `script.delete` | write | `{name?, code?, trigger?: manual\|open\|play\|frame, enabled?}` |
+| `script.run` | write | `{id?}` stored script or `{code?}` ad-hoc. `scene` API: add/update/rotate meshes, `scene.keys`, `scene.camera`, `scene.textures.generate`, `scene.models.generate` |
 | `scene.analyze` | read | `{projectId?}` → per-group model identification (chair, car, …) + part roles — **agents start here for styling** |
 | `scene.autopaint` | write | `{projectId?, groupIds?}` → coherent colors per part role; live = one Undo step |
 | `scene.autotexture` | generate | `{projectId?, groupIds?, size?, maxTextures?}` → autopaint + one AI texture per part role (slow, free tier ≈ 1 img/15s) |
@@ -190,7 +203,10 @@ Omit `projectId` to target the open project (live), or pass one from
 | `save.now` | write | `{projectId?}` → local + cloud (when signed in) |
 | `ai.ask` | generate | `{projectId?, question}` → grounded answer (`offline:true` + local scene answer when the cloud AI is unreachable) |
 | `image.generate` | generate | `{prompt, width?, height?, seed?, strict?}` → `{dataUrl, …}` |
-| `texture.generate` | generate | `{projectId?, prompt, materialId?, size?, seamless?, strict?}` → applied to material (new one if omitted) |
+| `texture.generate` | generate | `{projectId?, prompt, materialId?, objectId?, size?, seamless?, strict?}` → applied to material (new one if omitted); assign to `objectId` when set. Also `window.Web3DStudio.textures.generate(params, token)` |
+| `texture.list` | read | `{projectId?}` texture assets + materials |
+| `texture.apply` | write | `{projectId?, assetId, materialId?, objectId?}` |
+| `texture.capabilities` | — | Texture API health + provider. No auth |
 | `model.generate` | generate | `{projectId?, prompt, name?, quality?, model?, strict?}` → GLB imported; `quality`: fast/balanced/high; `model`: `sf3d` (best, default) or `triposr` (faster) |
 
 Generation responses include `provider` and, when a fallback fired,
@@ -245,7 +261,9 @@ unless `strict` is set.
   via `AGENT_RELAY_TOKEN`, and keep the relay on localhost unless you know
   what you're doing.
 - Imported/generated content is data, never executed: GLBs go through the
-  three.js loader, images through `createImageBitmap`.
+  three.js loader, images through `createImageBitmap`. Scene scripts are
+  user/agent-authored restricted JS (no `window`/`fetch`); GitHub-imported
+  scripts are stored **disabled** until someone turns them on.
 
 ## 7. Troubleshooting
 
@@ -257,6 +275,6 @@ unless `strict` is set.
 | Relay `TIMEOUT` | App tab open? Relay connected (green)? Long generations need bigger `timeoutMs`. |
 | Free 3D stuck on “waking…” | The HF Space sleeps when idle; first boot takes 1–3 min. Retry, or add a free `hf_…` token / use offline/custom 3D. |
 | Free texture 429 / slow | Anonymous Pollinations ≈ 1 req / 15s — wait and retry. |
-| Ask / `ai.ask` “ended anonymous access (402)” | Pollinations now requires a key for text: get a free one at enter.pollinations.ai/keys → ✨ AI → Setup → Pollinations key → Save → Test. A custom assistant endpoint (OpenAI, Ollama, …) also works. Counts/lists/summaries still answer offline. |
-| Ask / `ai.ask` “Couldn't reach…” (no 402) | The browser can't reach `*.pollinations.ai`: allow it in your ad-blocker/VPN/firewall, check DNS, or retry later. The free key above also routes around most anonymous-tier blocks. |
+| Ask / `ai.ask` “Couldn't reach the Groq assistant” | The Groq proxy at groq-proxy.mr-hackerdon808.workers.dev is down or blocked. Retry, switch to Pollinations in ✨ AI → Setup, or point Ask at a custom endpoint. Counts/lists/summaries still answer offline. |
+| Ask / `ai.ask` “ended anonymous access (402)” | Pollinations (fallback) now requires a key for text: get a free one at enter.pollinations.ai/keys → ✨ AI → Setup → Pollinations key → Save → Test. |
 | Custom API CORS errors | The endpoint must allow browser calls (`Access-Control-Allow-Origin`). Local Ollama/LM Studio work; some clouds need a proxy. |

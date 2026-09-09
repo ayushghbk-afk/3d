@@ -2,10 +2,11 @@
 // graceful fallbacks (custom → free → offline). Used by the Agent API and UI.
 import type { AiSettings } from './settings.js';
 import { aiSettings } from './settings.js';
-import type { ImageGenOptions, MeshGenOptions } from './types.js';
+import type { AgentMessage, ChatOptions, ImageGenOptions, MeshGenOptions } from './types.js';
 import type { ChatProvider, ImageProvider, MeshProvider } from './providers.js';
 import { PollinationsChatProvider, PollinationsImageProvider } from './pollinations.js';
 import { CustomChatProvider, CustomImageProvider, CustomMeshProvider } from './custom.js';
+import { GroqProxyChatProvider } from './groq.js';
 import { TripoSRMeshProvider } from './triposr.js';
 import { Sf3dMeshProvider } from './sf3d.js';
 import { ProceduralImageProvider, planProcedural, type ProcPart } from './procedural.js';
@@ -16,7 +17,32 @@ export function getChatProvider(s: AiSettings = aiSettings.get()): ChatProvider 
   if (s.assistantProvider === 'custom' && s.assistantCustom.baseUrl) {
     return new CustomChatProvider(s.assistantCustom);
   }
-  return new PollinationsChatProvider(undefined, s.pollinationsKey || undefined);
+  if (s.assistantProvider === 'pollinations') {
+    return new PollinationsChatProvider(undefined, s.pollinationsKey || undefined);
+  }
+  return new GroqProxyChatProvider({
+    baseUrl: s.groqProxyUrl,
+    model: s.groqModel,
+  });
+}
+
+/** Groq (default) → Pollinations → throw. Custom endpoints are not wrapped. */
+export async function chatSmart(
+  messages: AgentMessage[],
+  opts: ChatOptions = {},
+  s: AiSettings = aiSettings.get(),
+): Promise<string> {
+  const primary = getChatProvider(s);
+  try {
+    return await primary.chat(messages, opts);
+  } catch (e) {
+    if (s.assistantProvider === 'custom' || s.assistantProvider === 'pollinations') throw e;
+    try {
+      return await new PollinationsChatProvider(undefined, s.pollinationsKey || undefined).chat(messages, opts);
+    } catch {
+      throw e;
+    }
+  }
 }
 
 export function getImageProvider(s: AiSettings = aiSettings.get()): ImageProvider {

@@ -79,12 +79,17 @@ Editor → **✨ AI** opens AI Studio:
   any material.
 - **🖌️ Paint** — the AI looks at your groups to identify each model and its
   parts, then auto-paints, AI-textures or tidies the whole scene at once.
-- **💬 Ask** — project-grounded Q&A over the live scene summary (needs the
-  free Pollinations key in Setup; counts, lists and summaries keep working
-  offline regardless).
+- **💬 Ask** — project-grounded Q&A over the live scene summary. Default model
+  is Groq Llama via `groq-proxy.mr-hackerdon808.workers.dev` (no browser key).
+  Pollinations is the fallback; counts, lists and summaries keep working offline.
 - **🤖 Agent API** — let an AI agent list projects and make changes (objects,
-  materials, textures, models, keyframes) via in-page JS, `postMessage`,
-  `BroadcastChannel`, or real HTTP through `npm run agent-relay`.
+  materials, textures, models, keyframes, camera, scene scripts) via in-page JS,
+  `postMessage`, `BroadcastChannel`, or real HTTP through `npm run agent-relay`.
+- **🎨 Texture API** — dedicated sibling of the Agent API
+  (`window.Web3DStudio.textures`) so AI can generate and apply maps without
+  going through the full agent surface.
+- **{ } Scripts** — user (or AI) JavaScript that controls any mesh: coordinates,
+  keyframes, camera angle, extra models, AI textures. Toolbar **Scripts** or `J`.
 - **⚙️ Setup** — point the assistant, image or 3D slot at your own
   OpenAI-compatible endpoint + key. Keys never leave the browser.
 
@@ -95,10 +100,17 @@ Editor → **✨ AI** opens AI Studio:
 - **✨ AI Studio** is a floating window: drag it by the title bar, resize it by
   the corner, collapse it to a bar, or toggle it with the **✨ AI** button (or
   the `A` key) to reveal the 3D scene. Its position and size are remembered.
+- **{ } Scripts** is the same kind of floating window (`J` or the Scripts
+  button): write restricted JavaScript that moves any mesh, writes keyframes,
+  aims the camera, adds models and calls the texture generator. AI can add and
+  run the same scripts through `script.add` / `script.run`.
 - **Outliner, inspector and timeline** resize by dragging their edges and
   collapse via the arrow button or double-click; the layout is remembered.
 - **Every dialog** (menus, GitHub, members, shortcuts…) drags by its title bar
   and resizes by its corner.
+- **Fullscreen** (⛶ in the toolbar, **More**, or `F11`) hides the browser chrome.
+  After a moment of idle the editor tools auto-hide so the 3D view fills the
+  screen; move the mouse or tap **Show tools** to bring them back. `Esc` exits.
 
 ## Scripts
 

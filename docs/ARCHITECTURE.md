@@ -79,14 +79,16 @@ github/
   github.ts     PAT + Device-Flow auth, repo/branch/tree APIs, blob upload,
                 import detection, export commit builder
 ai/
-  agent-api.ts  AgentAPI: 30 methods (projects/objects/materials/assets/clips/
-                history/AI), token auth + scopes + rate limits + audit log;
-                live EditorSession or headless IndexedDB mutations
-  bridge.ts     transports: window.Web3DStudio + postMessage + BroadcastChannel
+  agent-api.ts  AgentAPI: projects/objects/materials/assets/clips/scripts/
+                camera/playback/history/AI + Texture API, token auth + scopes +
+                rate limits + audit log; live EditorSession or headless IndexedDB
+  scripts.ts    sandboxed scene JS (meshes, keyframes, camera, AI generate)
+  bridge.ts     transports: window.Web3DStudio.agent + .textures + postMessage + BroadcastChannel
   relay.ts      browser long-poll client for server/agent-relay.mjs (real HTTP)
   settings.ts   provider + token settings (on-device IndexedDB, VITE_AI_* defaults)
   factory.ts    provider wiring with custom → free → offline fallbacks
-  pollinations.ts  FREE image/texture (Flux) + assistant chat, no key
+  groq.ts       default Ask assistant (Llama via groq-proxy worker)
+  pollinations.ts  FREE image/texture (Flux) + Ask fallback chat
   gradio.ts     shared Gradio Space client (config/upload/queue/SSE/download)
   sf3d.ts       FREE text→3D (Stable Fast 3D Space, best quality, default)
   triposr.ts    FREE text→3D fallback (TripoSR Space, faster)
@@ -95,7 +97,7 @@ ai/
 server/agent-relay.mjs  zero-dep localhost HTTP relay for external agents
 ui/
   router, toast, dashboard, editor shell, outliner, inspector, toolbar,
-  timeline, modals, github-modal
+  timeline, modals, github-modal, chrome.ts (fullscreen + auto-hide tools)
 workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 ```
 
@@ -166,6 +168,8 @@ workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 - Frontend holds anon key only; RLS enforces owner/admin/editor/animator/viewer.
 - Storage paths namespaced `<project_id>/…`; policies re-check membership.
 - No `eval` of imported content; GLB parsed by three loader (no script execution).
+  User/agent scene scripts compile through `new Function` with a sealed `scene`
+  API; GitHub imports force `enabled: false`.
 
 ## 12. Performance budget (§45–47)
 
@@ -189,7 +193,7 @@ workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 - [ ] Phase 5 — animation: graph editor, GLB clip import, retarget basics.
 - [ ] Phase 6 — modeling: half-edge ops, bevel/loopcut/knife/mirror/subdiv.
 - [ ] Phase 7 — workers/wasm/UV/paint/LOD/node materials.
-- [x] Phase 8 (agent/API slice) — AI Studio: free Stable Fast 3D (+TripoSR fallback) + Pollinations textures,
+- [x] Phase 8 (agent/API slice) — AI Studio: Groq Llama Ask (proxy) + free Stable Fast 3D (+TripoSR fallback) + Pollinations textures,
       custom OpenAI-compatible endpoints, Agent API (page/postMessage/channel/relay),
       token auth + audit log, offline fallbacks. Remaining: PR export, repo templates.
 - [ ] Phase 8 — GitHub: PR export, repo templates.

@@ -1,13 +1,14 @@
 import { deepClone } from '../lib/utils.js';
 import type { ProjectDoc } from '../state/models.js';
 
-// Snapshot-ring undo/redo. Snapshots cover objects/materials/clips only
+// Snapshot-ring undo/redo. Snapshots cover objects/materials/clips/scripts
 // (lightweight; blobs/assets referenced by id).
 interface Snap {
   label: string;
   objects: ProjectDoc['objects'];
   materials: ProjectDoc['materials'];
   clips: ProjectDoc['clips'];
+  scripts: ProjectDoc['scripts'];
 }
 
 export class History {
@@ -24,6 +25,7 @@ export class History {
       objects: deepClone(doc.objects),
       materials: deepClone(doc.materials),
       clips: deepClone(doc.clips),
+      scripts: deepClone(doc.scripts ?? []),
     };
   }
 
@@ -55,6 +57,7 @@ export class History {
     doc.objects = s.objects;
     doc.materials = s.materials;
     doc.clips = s.clips;
+    doc.scripts = s.scripts ?? [];
     this.onChange?.();
     return true;
   }
@@ -66,6 +69,7 @@ export class History {
     doc.objects = s.objects;
     doc.materials = s.materials;
     doc.clips = s.clips;
+    doc.scripts = s.scripts ?? [];
     this.onChange?.();
     return true;
   }

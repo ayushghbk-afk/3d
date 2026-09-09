@@ -11,14 +11,25 @@ import { buildTimeline } from './timeline.js';
 import { openModal, closeModal } from './modals.js';
 import { attachDocking } from './docking.js';
 import { closeFloatWin } from './floatwin.js';
+import { attachAutoHideChrome, type AutoHideChrome } from './chrome.js';
 import { openGithubImport, openGithubExport, openMembersModal, openVersionsModal, openShortcutsModal } from './panels.js';
 import { setEditorSession } from '../ai/index.js';
 
 export function mountEditor(root: HTMLElement, projectId: string): () => void {
   let session: EditorSession | null = null;
   let cancelled = false;
+  let chrome: AutoHideChrome | null = null;
   const unsubs: (() => void)[] = [];
   const keyHandler = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && chrome?.handleEscape()) {
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'F11') {
+      e.preventDefault();
+      void chrome?.toggle();
+      return;
+    }
     if (!session || (e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
     const mod = e.ctrlKey || e.metaKey;
     if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) {
@@ -53,6 +64,8 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
       togglePlay();
     } else if (e.key.toLowerCase() === 'a' && !document.getElementById('modal-root')?.hasChildNodes()) {
       openAi(session);
+    } else if (e.key.toLowerCase() === 'j' && !document.getElementById('modal-root')?.hasChildNodes()) {
+      openScripts(session);
     } else if (e.key === '?') {
       openShortcutsModal();
     }
@@ -69,7 +82,9 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
         <span id="tb-presence" class="presence"></span>
         <button id="tb-members" class="btn btn-sm">People</button>
         <button id="tb-ai" class="btn btn-sm" title="AI Studio — toggle (A). Drag, resize, collapse.">AI Studio</button>
+        <button id="tb-scripts" class="btn btn-sm" title="Scene scripts — control meshes, keyframes, camera (J).">Scripts</button>
         <button id="tb-github" class="btn btn-sm">GitHub</button>
+        <button id="tb-fs" class="btn btn-icon" title="Fullscreen — hide browser chrome; tools auto-hide when idle (F11)" aria-label="Fullscreen" aria-pressed="false">⛶</button>
         <button id="tb-menu" class="btn btn-sm">More</button>
       </header>
       <div class="editor-main">
@@ -231,8 +246,10 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     };
     (root.querySelector('#tb-members') as HTMLButtonElement).onclick = () => openMembersModal(s);
     (root.querySelector('#tb-ai') as HTMLButtonElement).onclick = () => openAi(s);
+    (root.querySelector('#tb-scripts') as HTMLButtonElement).onclick = () => openScripts(s);
     (root.querySelector('#tb-github') as HTMLButtonElement).onclick = () => openGithubMenu(s);
-    (root.querySelector('#tb-menu') as HTMLButtonElement).onclick = () => openEditorMenu(s, togglePlay);
+    (root.querySelector('#tb-fs') as HTMLButtonElement).onclick = () => void chrome?.toggle();
+    (root.querySelector('#tb-menu') as HTMLButtonElement).onclick = () => openEditorMenu(s, togglePlay, chrome);
     updateGizmoButtons();
   }
 
@@ -243,6 +260,9 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     });
   }
   const modePoll = setInterval(updateGizmoButtons, 500);
+
+  chrome = attachAutoHideChrome(root.querySelector('.editor') as HTMLElement);
+  unsubs.push(() => chrome?.dispose());
 
   window.addEventListener('keydown', keyHandler);
   void boot();
@@ -258,6 +278,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     });
     setEditorSession(null);
     closeFloatWin('ai-studio');
+    closeFloatWin('scripts');
     session?.dispose();
     session = null;
     root.innerHTML = '';
@@ -395,12 +416,14 @@ function openAddSheet(s: EditorSession): void {
 }
 
 // ---------- menus ----------
-function openEditorMenu(s: EditorSession, togglePlay: () => void): void {
+function openEditorMenu(s: EditorSession, togglePlay: () => void, chrome: AutoHideChrome | null): void {
   const body = document.createElement('div');
   body.className = 'menu-list';
   const items: { label: string; fn: () => void }[] = [
     { label: 'Save now', fn: () => void s.forceSave().then(() => toast('Saved', 'success')) },
+    { label: chrome?.isEnabled() ? 'Exit fullscreen' : 'Fullscreen (auto-hide chrome)', fn: () => void chrome?.toggle() },
     { label: 'Open AI Studio', fn: () => openAi(s) },
+    { label: 'Open Scripts', fn: () => openScripts(s) },
     { label: 'Import GLB', fn: () => void importGlb(s) },
     { label: 'Export GLB', fn: () => void s.exportGlb() },
     { label: 'GitHub import / export', fn: () => openGithubMenu(s) },
@@ -434,6 +457,10 @@ function openAi(s: EditorSession): void {
   // Floating ✨ AI Studio: toggleable — pressing ✨ AI / A again hides it to
   // reveal the 3D scene; it also collapses and remembers its position/size.
   void import('./ai-panel.js').then(({ toggleAiPanel }) => toggleAiPanel(s));
+}
+
+function openScripts(s: EditorSession): void {
+  void import('./script-panel.js').then(({ toggleScriptPanel }) => toggleScriptPanel(s));
 }
 
 function openGithubMenu(s: EditorSession): void {

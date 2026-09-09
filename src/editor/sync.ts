@@ -141,7 +141,7 @@ export class SyncEngine {
 
       // objects: upsert all, delete missing
       // scene settings ride on the scene row
-      await sb.from('scenes').update({ data: { settings: doc.settings } }).eq('id', this.sceneId).select('id').single().throwOnError();
+      await sb.from('scenes').update({ data: { settings: doc.settings, scripts: doc.scripts ?? [] } }).eq('id', this.sceneId).select('id').single().throwOnError();
       const rows = doc.objects.map((o) => ({
         id: o.id, scene_id: this.sceneId as string, project_id: doc.id, name: o.name,
         object_type: o.type, parent_id: o.parentId,
@@ -288,6 +288,7 @@ export class SyncEngine {
           storagePath: (a.storage_path as string) ?? null, local: false, thumb: null, createdAt: (a.created_at as string) ?? nowIso(),
         })),
         activeClipId: local?.activeClipId ?? clips[0]?.id ?? null,
+        scripts: Array.isArray(sceneData.scripts) ? (sceneData.scripts as ProjectDoc['scripts']) : (local?.scripts ?? []),
         updatedAt: p.updated_at, version: p.version, cloudVersion: p.version,
       };
     } catch (e) {
@@ -518,7 +519,7 @@ export class SyncEngine {
       const next = (((data as { version: number } | null)?.version) ?? 0) + 1;
       const { error } = await supabase().from('project_versions').insert({
         project_id: doc.id, version: next, label,
-        snapshot: JSON.parse(JSON.stringify({ objects: doc.objects, materials: doc.materials, clips: doc.clips })),
+        snapshot: JSON.parse(JSON.stringify({ objects: doc.objects, materials: doc.materials, clips: doc.clips, scripts: doc.scripts })),
         created_by: auth.user.get()?.id ?? null,
       });
       if (error) throw error;
@@ -547,7 +548,7 @@ export class SyncEngine {
     if (!this.ready()) return false;
     const { data } = await supabase().from('project_versions').select('snapshot,label,version').eq('id', id).single();
     if (!data) return false;
-    const d = data as { snapshot: { objects: ProjectDoc['objects']; materials: ProjectDoc['materials']; clips: ProjectDoc['clips'] }; label: string | null; version: number };
+    const d = data as { snapshot: { objects: ProjectDoc['objects']; materials: ProjectDoc['materials']; clips: ProjectDoc['clips']; scripts?: ProjectDoc['scripts'] }; label: string | null; version: number };
     this.session.restoreSnapshot(d.snapshot, d.label || `v${d.version}`);
     return true;
   }
