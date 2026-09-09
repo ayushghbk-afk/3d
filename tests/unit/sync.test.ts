@@ -21,6 +21,8 @@ let failRequest = '';
 let failures = { code: '42501', message: 'Permission denied' };
 const calls: { route: string; body: unknown }[] = [];
 let duringRequest: (() => void) | null = null;
+// the row(s) the mocked PATCH projects returns — a CAS miss looks like `[]`
+let patchProjects: unknown = { id: '00000000-0000-4000-8000-000000000000' };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -28,6 +30,7 @@ beforeEach(() => {
   failures = { code: '42501', message: 'Permission denied' };
   calls.length = 0;
   duringRequest = null;
+  patchProjects = { id: doc0Id() };
   mocks.getProject.mockResolvedValue(null);
   mocks.saveProject.mockResolvedValue(undefined);
   mocks.enqueue.mockResolvedValue(undefined);
@@ -61,13 +64,15 @@ beforeEach(() => {
         if (table === 'scenes') data = [{ id: '10000000-0000-4000-8000-000000000001', data: {} }];
         if (table === 'scene_objects') data = [{ id: doc.objects[0].id }];
       }
-      if (method === 'PATCH' && table === 'projects') data = { id: doc.id };
+      if (method === 'PATCH' && table === 'projects') data = patchProjects;
       if (method === 'PATCH' && table === 'scenes') data = { id: '10000000-0000-4000-8000-000000000001' };
       return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } },
   });
   engine = new SyncEngine(session);
 });
+
+function doc0Id(): string { return '00000000-0000-4000-8000-000000000000'; }
 afterEach(() => { engine.dispose(); });
 
 it.each(['PATCH scenes', 'POST scene_objects', 'POST materials', 'POST animation_tracks', 'POST keyframes', 'PATCH projects'])('does not report a successful save when %s fails', async (route) => {
@@ -122,4 +127,26 @@ it('uses chronological queue order, preferring current offline edits', async () 
   await engine.flushQueue();
   expect(push).toHaveBeenCalledWith(session.doc);
   expect(mocks.clearQueue).toHaveBeenCalledWith(['a-newer', 'z-older']);
+});
+it('refuses to overwrite a newer cloud revision (compare-and-swap)', async () => {
+  // ensureCloudProject observes the row at doc.version and CAS-checks it;
+  // a row that no longer matches (a peer wrote in between) yields 0 rows.
+  patchProjects = [];
+  expect(await engine.pushDoc(session.doc)).toBe(false);
+  expect(mocks.enqueue).toHaveBeenCalledOnce();
+  expect(session.syncError.get()).toContain('saved this project first');
+  expect(session.doc.cloudVersion).toBe(0); // content claim never advanced
+});
+
+it('adopts the pulled head after a conflict so "keep mine" can push on top', async () => {
+  patchProjects = [];
+  expect(await engine.pushDoc(session.doc)).toBe(false);
+  // start-of-session state would then show the recovery modal; the local doc
+  // must not be re-pushed while a conflict is pending.
+  expect(session.pendingRecovery).toBeTruthy();
+  const cloud = session.pendingRecovery as { version: number };
+  session.pendingRecovery = null;
+  session.doc.version = cloud.version + 1;
+  patchProjects = { id: doc0Id() };
+  expect(await engine.pushDoc(session.doc)).toBe(true);
 });

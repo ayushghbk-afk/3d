@@ -59,7 +59,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
       session.setTransformMode('rotate');
     } else if (e.key.toLowerCase() === 'r') {
       session.setTransformMode('scale');
-    } else if (e.key === ' ') {
+    } else if (e.key === ' ' && !document.getElementById('modal-root')?.hasChildNodes()) {
       e.preventDefault();
       togglePlay();
     } else if (e.key.toLowerCase() === 'a' && !document.getElementById('modal-root')?.hasChildNodes()) {
@@ -145,6 +145,8 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
           { label: 'Keep mine', onClick: async () => {
             if (!session) return;
             session.pendingRecovery = null;
+            // sync.ts adopted the peer head as the CAS base; push our
+            // (version-bumped) document on top of it.
             session.doc.version = Math.max(session.doc.version, cloud.version) + 1;
             await session.cloudSave();
             if (!session.syncError.get()) await localDb.clearQueue((await localDb.listQueue(session.doc.id)).map((op) => op.id));
@@ -251,15 +253,30 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     (root.querySelector('#tb-fs') as HTMLButtonElement).onclick = () => void chrome?.toggle();
     (root.querySelector('#tb-menu') as HTMLButtonElement).onclick = () => openEditorMenu(s, togglePlay, chrome);
     updateGizmoButtons();
+    // store-driven instead of a 500 ms poll: rail state follows W/E/R, snap
+    // and the current undo step the moment they change (buttons, keys, agents)
+    unsubs.push(wireRailState());
   }
 
+  function wireRailState(): () => void {
+    if (!session) return () => undefined;
+    const a = session.transformMode.subscribe(updateGizmoButtons);
+    const b = session.snap.subscribe(updateGizmoButtons);
+    const c = session.rev.subscribe(updateGizmoButtons);
+    return () => { a(); b(); c(); };
+  }
   function updateGizmoButtons(): void {
     root.querySelectorAll('[data-tmode]').forEach((b) => {
       const on = session?.transformMode.get() === (b as HTMLElement).dataset.tmode;
       b.classList.toggle('active', on);
     });
+    root.querySelectorAll('[data-snap]').forEach((b) => b.classList.toggle('active', session?.snap.get() === true));
+    const undoBtn = root.querySelector('[data-act="undo"]') as HTMLElement | null;
+    if (undoBtn && session) {
+      const label = session.history.undoLabel();
+      undoBtn.title = label ? `Undo ${label} (Ctrl+Z)` : 'Undo (Ctrl+Z)';
+    }
   }
-  const modePoll = setInterval(updateGizmoButtons, 500);
 
   chrome = attachAutoHideChrome(root.querySelector('.editor') as HTMLElement);
   unsubs.push(() => chrome?.dispose());
@@ -269,7 +286,6 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
 
   return () => {
     cancelled = true;
-    clearInterval(modePoll);
     window.removeEventListener('keydown', keyHandler);
     unsubs.forEach((u) => {
       try {
@@ -307,6 +323,7 @@ function buildRail(s: EditorSession, el: HTMLElement): void {
       ${toolButton('data-tmode="translate" title="Move (W)"', '↔', 'Move', 'W')}
       ${toolButton('data-tmode="rotate" title="Rotate (E)"', '🔄', 'Rotate', 'E')}
       ${toolButton('data-tmode="scale" title="Scale (R)"', '📐', 'Scale', 'R')}
+      ${toolButton('data-snap title="Snap: 0.1 units / 15°"', '🧲', 'Snap')}
     </div>
     <div class="rail-section" role="group" aria-label="Add shapes">
       <div class="rail-title">Create</div>
@@ -314,7 +331,7 @@ function buildRail(s: EditorSession, el: HTMLElement): void {
     </div>
     <div class="rail-section" role="group" aria-label="Scene actions">
       <div class="rail-title">Scene</div>
-      ${toolButton('data-act="group" title="Group selected objects"', '🗂', 'Group')}
+      ${toolButton('data-act="group" title="Wrap the selected object in a new Group"', '🗂', 'Group')}
       ${toolButton('data-act="light" title="Add a light"', '💡', 'Light')}
       ${toolButton('data-act="import" title="Import GLB"', '📥', 'Import GLB')}
       ${toolButton('data-act="focus" title="Focus selected object (F)"', '🎯', 'Focus', 'F')}
@@ -336,7 +353,12 @@ function buildRail(s: EditorSession, el: HTMLElement): void {
     (b as HTMLButtonElement).onclick = () => s.addPrimitive((b as HTMLElement).dataset.prim as PrimitiveType);
   });
   const acts: Record<string, () => void> = {
-    group: () => s.addGroup(),
+    group: () => s.groupSelection(),
+    snap: () => {
+      const next = !s.snap.get();
+      s.snap.set(next);
+      void localDb.setSetting('gizmo.snap', next ? '1' : '0');
+    },
     light: () => s.addLight(),
     focus: () => s.focusSelected(),
     undo: () => s.undo(),
@@ -363,6 +385,7 @@ function buildMobileBar(s: EditorSession, el: HTMLElement, togglePlay: () => voi
     <button data-m="add" title="Add">＋</button>
     <button data-m="key" title="Keyframe">◉</button>
     <button data-m="play" title="Play">▶</button>
+    <button data-m="scene" title="Scene list">🗂</button>
     <button data-m="props" title="Properties">⋮</button>`;
   el.querySelector('[data-tmode]')?.classList.add('active');
   const cycle: TransformMode[] = ['translate', 'rotate', 'scale'];
@@ -382,10 +405,15 @@ function buildMobileBar(s: EditorSession, el: HTMLElement, togglePlay: () => voi
     togglePlay();
     playBtn.textContent = s.playback.playing ? '⏸' : '▶';
   };
-  (el.querySelector('[data-m="props"]') as HTMLButtonElement).onclick = () => {
-    document.querySelector('.inspector')?.classList.toggle('sheet-open');
-    document.querySelector('.outliner')?.classList.toggle('sheet-open');
+  // both sheets used to toggle together — the inspector (z 51) covered the
+  // outliner (z 50), so the scene list was unreachable on phones
+  const toggleSheet = (target: '.inspector' | '.outliner') => {
+    const other = target === '.inspector' ? '.outliner' : '.inspector';
+    document.querySelector(other)?.classList.remove('sheet-open');
+    document.querySelector(target)?.classList.toggle('sheet-open');
   };
+  (el.querySelector('[data-m="scene"]') as HTMLButtonElement).onclick = () => toggleSheet('.outliner');
+  (el.querySelector('[data-m="props"]') as HTMLButtonElement).onclick = () => toggleSheet('.inspector');
 }
 
 function openAddSheet(s: EditorSession): void {

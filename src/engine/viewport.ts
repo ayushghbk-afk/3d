@@ -30,7 +30,14 @@ export function attachToParent(
   // Missing parent (not loaded yet / deleted peer-side): park at root. The
   // load path re-runs this via fixParenting once every object exists.
   const parent = data.parentId ? (objects.get(data.parentId) ?? scene) : scene;
-  if (obj.parent !== parent) parent.add(obj);
+  if (obj.parent === parent) return;
+  // Cycle defense: docs saved by older builds could contain parentId loops.
+  // Attaching a node inside its own subtree would hang matrix traversal, so
+  // skip the (re)parenting and leave the object where it is (root-parked).
+  for (let a: THREE.Object3D | null = parent; a; a = a.parent) {
+    if (a === obj) return;
+  }
+  parent.add(obj);
 }
 
 /**

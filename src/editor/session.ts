@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Viewport } from '../engine/viewport.js';
 import { TransformGizmo } from '../engine/transform.js';
-import { parseGlb, exportGlb } from '../engine/gltf.js';
+import { parseGlb, exportGlb, docClipsToAnimationClips, exportNodeName } from '../engine/gltf.js';
 import { History } from './history.js';
 import { Playback, activeClip, setKeyframe, deleteKeyframeAt, samplePose, trackValueOf } from './animation.js';
 import { SyncEngine } from './sync.js';
@@ -20,6 +20,7 @@ import { uid, nowIso, debounce, throttle, makeThumb } from '../lib/utils.js';
 import { generateImageSmart, generateMeshSmart } from '../ai/factory.js';
 import { texturePrompt } from '../ai/pollinations.js';
 import { ScriptEngine, SCRIPT_MAX_CODE, SCRIPT_MAX_COUNT, type ScriptHost, type ScriptRunResult } from './scripts.js';
+import { collectSubtree, isWithinSubtree } from '../state/tree.js';
 
 export type SaveState = 'saved' | 'saving' | 'local' | 'offline' | 'error';
 
@@ -52,6 +53,8 @@ export class EditorSession implements ScriptHost {
   anim = new Store<{ playing: boolean; frame: number; length: number; fps: number }>({
     playing: false, frame: 0, length: 90, fps: 30,
   });
+  snap = new Store<boolean>(false); // gizmo translation/rotation/scale snapping
+  loop = new Store<boolean>(true); // playback loops the active clip
   rev = new Store<number>(0); // bumped on every doc mutation -> UI refresh
   canEdit = new Store<boolean>(true);
   autoKey = new Store<boolean>(false); // ⏺ record: transform edits write keyframes
@@ -145,6 +148,9 @@ export class EditorSession implements ScriptHost {
       if (id) this.broadcastLock(true);
     });
     this.transformMode.subscribe((m) => this.gizmo.setMode(m));
+    this.snap.subscribe((on) => this.gizmo.setSnap(on));
+    this.loop.subscribe((on) => { this.playback.loop = on; });
+    void localDb.getSetting('gizmo.snap').then((v) => { if (v === '1') this.snap.set(true); });
     this.shadingMode.subscribe((m) => viewport.setShading(m, this.doc.settings?.envIntensity ?? 1));
     this.cameraType.subscribe((t) => {
       viewport.setCameraType(t);
@@ -236,7 +242,8 @@ export class EditorSession implements ScriptHost {
     try {
       if (Date.now() - this.lastThumb > 10000) {
         this.lastThumb = Date.now();
-        const thumb = this.viewport.captureThumbnail();
+        // same leak as GLB export: never bake the blue selection highlight
+        const thumb = this.withHighlightOff(() => this.viewport.captureThumbnail());
         if (thumb) this.doc.thumbnail = thumb;
       }
       await localDb.saveProject(this.doc);
@@ -349,35 +356,56 @@ export class EditorSession implements ScriptHost {
     return `${base} ${i}`;
   }
 
+  /**
+   * Deletes the whole subtree — a Group must not orphan its grandchildren
+   * (the old one-level filter did exactly that, and peers received a
+   * different scene because only the root id was broadcast).
+   */
   deleteObject(id?: string): void {
     const target = id ?? this.selection.get();
     if (!target || !this.canEditObject(target)) return;
     this.history.checkpoint(this.doc, 'Delete');
-    const ids = new Set([target, ...this.doc.objects.filter((o) => o.parentId === target).map((o) => o.id)]);
+    const ids = new Set(collectSubtree(this.doc.objects, target).map((o) => o.id));
     this.doc.objects = this.doc.objects.filter((o) => !ids.has(o.id));
     ids.forEach((x) => this.viewport.removeObject(x));
+    // Drop animation tracks pointing at deleted objects, so clips don't
+    // accumulate ghost lanes that reference ids nobody can select.
+    const survivors = new Set(this.doc.objects.map((o) => o.id));
+    for (const c of this.doc.clips) c.tracks = c.tracks.filter((t) => survivors.has(t.objectId));
     if (this.selection.get() && ids.has(this.selection.get() as string)) this.select(null);
     this.markDirty('delete');
-    this.sync.broadcastOp('delete', { id: target });
+    ids.forEach((x) => this.sync.broadcastOp('delete', { id: x }));
   }
 
+  /** Duplicates the selected object INCLUDING its descendants (a Group copy
+   * without children was silently losing the point of grouping). */
   duplicateObject(id?: string): SceneObjectData | null {
     const target = id ?? this.selection.get();
     const src = target ? this.doc.objects.find((o) => o.id === target) : null;
     if (!src) return null;
     this.history.checkpoint(this.doc, 'Duplicate');
-    const copy: SceneObjectData = JSON.parse(JSON.stringify(src)) as SceneObjectData;
-    copy.id = uid();
-    copy.name = this.uniqueName(`${src.name} copy`);
-    copy.position = { ...src.position, x: src.position.x + 0.5 };
-    copy.version = 1;
-    this.doc.objects.push(copy);
-    this.viewport.addObject(copy);
-    if (copy.type === 'imported' && copy.assetId) void this.attachAsset(copy);
-    this.select(copy.id);
+    const subtree = collectSubtree(this.doc.objects, src.id);
+    const idMap = new Map<string, string>();
+    for (const node of subtree) idMap.set(node.id, uid());
+    const rootCopy: SceneObjectData | null = null;
+    const created: SceneObjectData[] = [];
+    for (const node of subtree) {
+      const copy = JSON.parse(JSON.stringify(node)) as SceneObjectData;
+      copy.id = idMap.get(node.id) as string;
+      copy.name = node.id === src.id ? this.uniqueName(`${src.name} copy`) : node.name;
+      if (node.id === src.id) copy.position = { ...src.position, x: src.position.x + 0.5 };
+      copy.parentId = node.parentId && idMap.has(node.parentId) ? idMap.get(node.parentId) as string : node.parentId;
+      copy.version = 1;
+      this.doc.objects.push(copy);
+      this.viewport.addObject(copy); // parents pushed first — children attach via reparent
+      if (copy.type === 'imported' && copy.assetId) void this.attachAsset(copy);
+      this.sync.broadcastOp('add', copy);
+      created.push(copy);
+    }
+    if (created.length) this.select(created[0].id);
     this.markDirty('add');
-    this.sync.broadcastOp('add', copy);
-    return copy;
+    void rootCopy;
+    return created[0] ?? null;
   }
 
   renameObject(id: string, name: string): void {
@@ -394,14 +422,37 @@ export class EditorSession implements ScriptHost {
   setParent(childId: string, parentId: string | null): void {
     const o = this.doc.objects.find((x) => x.id === childId);
     if (!o || childId === parentId) return;
+    if (!this.canEditObject(childId)) return;
+    // Cycle defense: the parent must not be the object itself or any of its
+    // descendants — a THREE parent loop hangs the matrix/render walk and used
+    // to freeze the whole tab (the inspector dropdown offered exactly that).
+    if (parentId && isWithinSubtree(this.doc.objects, childId, parentId)) {
+      this.notice('warn', 'Cannot parent an object inside itself');
+      return;
+    }
     this.history.checkpoint(this.doc, 'Reparent');
+    this.reparentData(o, parentId);
+    this.markDirty('edit');
+    this.sync.broadcastOp('update', o);
+  }
+
+  /**
+   * Shared reparent core: reassign parentId and bake the current world
+   * transform into the new local space. No checkpoint/dirty/broadcast —
+   * callers wrap it (single reparent vs. ungroup bulk).
+   */
+  private reparentData(o: SceneObjectData, parentId: string | null): void {
     o.parentId = parentId;
     o.version++;
-    // bake current world transform into local
-    const obj = this.viewport.objects.get(childId);
+    o.updatedAt = nowIso();
+    const obj = this.viewport.objects.get(o.id);
     if (obj) {
       const parent = parentId ? this.viewport.objects.get(parentId) : this.viewport.scene;
       if (parent) {
+        // refresh BOTH chains first: freshly added objects still hold an
+        // identity matrixWorld until the next render tick (same trap as
+        // fixParenting — see viewport.ts), and baking from it zeroed transforms
+        obj.updateWorldMatrix(true, false);
         parent.updateWorldMatrix(true, false);
         const m = new THREE.Matrix4().copy(obj.matrixWorld).premultiply(new THREE.Matrix4().copy(parent.matrixWorld).invert());
         const p = new THREE.Vector3();
@@ -415,8 +466,41 @@ export class EditorSession implements ScriptHost {
       }
     }
     this.viewport.updateObject(o);
+  }
+
+  /** Rail "Group": wraps the current selection in a new Group (title said
+   * "Group selected objects" but it only ever added an empty group). */
+  groupSelection(): SceneObjectData {
+    const sel = this.selectedObject();
+    const group = this.addGroup();
+    if (sel && this.canEditObject(sel.id) && sel.id !== group.id) {
+      this.reparentData(sel, group.id);
+      this.markDirty('edit');
+      this.sync.broadcastOp('update', sel);
+    }
+    return group;
+  }
+
+  /** Dissolve a Group: children are re-parented (world transforms preserved)
+   * and the now-empty container is removed. */
+  ungroupObject(id?: string): void {
+    const target = id ?? this.selection.get();
+    const o = target ? this.doc.objects.find((x) => x.id === target) : null;
+    if (!o || o.type !== 'group') return;
+    const kids = this.doc.objects.filter((x) => x.parentId === o.id);
+    if (!kids.length) {
+      this.deleteObject(o.id);
+      return;
+    }
+    this.history.checkpoint(this.doc, 'Ungroup');
+    for (const kid of kids) {
+      this.reparentData(kid, o.parentId);
+      this.sync.broadcastOp('update', kid);
+    }
+    this.doc.objects = this.doc.objects.filter((x) => x.id !== o.id);
+    this.viewport.removeObject(o.id);
     this.markDirty('edit');
-    this.sync.broadcastOp('update', o);
+    this.sync.broadcastOp('delete', { id: o.id });
   }
 
   setVisible(id: string, visible: boolean): void {
@@ -792,15 +876,59 @@ export class EditorSession implements ScriptHost {
     return this.doc.assets.find((a) => a.id === assetId)?.thumb ?? null;
   }
 
-  async exportGlb(): Promise<void> {
-    const group = new THREE.Group();
-    for (const o of this.doc.objects) {
-      if (o.parentId) continue; // roots only; children ride along
-      const obj = this.viewport.objects.get(o.id);
-      if (obj) group.add(obj.clone(true));
-    }
+  /**
+   * Runs `fn` with the selection highlight un-applied. The highlight mutates
+   * SHARED material emissive (viewport.applyOutline) and clones reference the
+   * same material instances — without this, every export/thumbnail taken
+   * while an object was selected baked a blue glow into the saved project.
+   */
+  private withHighlightOff<T>(fn: () => T): T {
+    const sel = this.selection.get();
+    if (!sel) return fn();
+    this.viewport.outline(null);
     try {
-      const buf = await exportGlb(group);
+      return fn();
+    } finally {
+      this.viewport.outline(sel);
+    }
+  }
+
+  async exportGlb(): Promise<void> {
+    // Export is authored from the DOCUMENT, not the live viewport:
+    //  - playback/scrubbing writes sampled poses straight onto viewport
+    //    objects, so cloning them mid-animation baked a random frame into the
+    //    file ("looks correct in the app, broken in every viewer" class);
+    //  - the selection highlight must not leak (withHighlightOff).
+    const group = new THREE.Group();
+    const restore: { obj: THREE.Object3D; p: THREE.Vector3; r: THREE.Euler; s: THREE.Vector3; name: string }[] = [];
+    const idToNode = new Map<string, THREE.Object3D>();
+    const byId = new Map(this.doc.objects.map((o) => [o.id, o]));
+    this.doc.objects.forEach((o, i) => {
+      const obj = this.viewport.objects.get(o.id);
+      if (!obj) return;
+      restore.push({ obj, p: obj.position.clone(), r: obj.rotation.clone(), s: obj.scale.clone(), name: obj.name });
+      obj.position.set(o.position.x, o.position.y, o.position.z);
+      obj.rotation.set(o.rotation.x, o.rotation.y, o.rotation.z);
+      obj.scale.set(o.scale.x, o.scale.y, o.scale.z);
+      // stable, binding-safe names for animation tracks
+      obj.name = exportNodeName(o.name, i);
+    });
+    try {
+      this.withHighlightOff(() => {
+        this.viewport.scene.updateMatrixWorld(true);
+        for (const o of this.doc.objects) {
+          // roots only; children ride along. Orphans (parentId set but the
+          // parent object is gone) export as roots instead of vanishing.
+          if (o.parentId && byId.has(o.parentId)) continue;
+          const obj = this.viewport.objects.get(o.id);
+          if (!obj) continue;
+          const clone = obj.clone(true);
+          group.add(clone);
+          idToNode.set(o.id, clone);
+        }
+      });
+      const animations = docClipsToAnimationClips(this.doc.clips, idToNode);
+      const buf = await exportGlb(group, animations);
       const blob = new Blob([buf], { type: 'model/gltf-binary' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -809,6 +937,15 @@ export class EditorSession implements ScriptHost {
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     } catch (e) {
       this.notice('error', `GLB export failed: ${(e as Error).message}`);
+    } finally {
+      for (const r of restore) {
+        r.obj.position.copy(r.p);
+        r.obj.rotation.copy(r.r);
+        r.obj.scale.copy(r.s);
+        r.obj.name = r.name;
+      }
+      // if a clip is active, put the viewport back on the sampled pose
+      if (this.playback.playing || this.playback.frame > 0) this.applyPose(this.playback.frame);
     }
   }
 

@@ -27,6 +27,7 @@ export function buildTimeline(s: EditorSession, el: HTMLElement, togglePlay: () 
         </select>
         <button class="btn btn-sm" data-tl="addclip" title="New clip">New clip</button>
         <button class="btn btn-sm" data-tl="stop" title="Stop playback">⏹ Stop</button>
+        <button class="btn btn-sm${s.loop.get() ? ' active' : ''}" data-tl="loop" title="Loop the clip while playing">🔁 Loop</button>
         <button class="btn btn-sm" data-tl="play" title="Play/Pause (Space)">${st.playing ? '⏸ Pause' : '▶ Play'}</button>
         <button class="btn btn-sm ${s.autoKey.get() ? 'rec-on' : ''}" data-tl="rec" title="Auto-key (record): transform edits write keyframes">⏺ Auto-key</button>
         <button class="btn btn-sm" data-tl="prevkey" title="Previous keyframe">Prev key</button>
@@ -62,6 +63,10 @@ export function buildTimeline(s: EditorSession, el: HTMLElement, togglePlay: () 
         render();
       },
       stop: () => s.playback.stop(),
+      loop: () => {
+        s.loop.set(!s.loop.get());
+        render();
+      },
       play: () => togglePlay(),
       rec: () => {
         s.autoKey.set(!s.autoKey.get());

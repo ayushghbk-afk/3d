@@ -12,6 +12,7 @@ import {
   type AnimTrack, type CameraState, type LightKind, type MaterialData, type ObjectType, type PrimitiveType,
   type ProjectDoc, type ProjectMode, type SceneObjectData, type ScriptTrigger,
 } from '../state/models.js';
+import { collectSubtree, isWithinSubtree } from '../state/tree.js';
 import { localDb } from '../lib/indexeddb.js';
 import { uid, nowIso } from '../lib/utils.js';
 import { toAiContext, toProjectJson, toSceneJson } from '../editor/serialization.js';
@@ -486,7 +487,11 @@ export class AgentAPI {
         obj.materialId = materialId;
       }
       if (parentId !== undefined) {
-        if (parentId === id) throw new AgentError('VALIDATION', 'An object cannot be its own parent.');
+        if (parentId && isWithinSubtree(t.doc.objects, id, parentId)) {
+          throw new AgentError('VALIDATION', parentId === id
+            ? 'An object cannot be its own parent.'
+            : 'An object cannot be parented inside its own subtree.');
+        }
         if (parentId) findObject(t.doc, parentId);
         obj.parentId = parentId;
       }
@@ -517,8 +522,10 @@ export class AgentAPI {
       t.session.deleteObject(id);
     } else {
       findObject(t.doc, id);
-      const ids = new Set([id, ...t.doc.objects.filter((o) => o.parentId === id).map((o) => o.id)]);
+      const ids = new Set(collectSubtree(t.doc.objects, id).map((o) => o.id));
       t.doc.objects = t.doc.objects.filter((o) => !ids.has(o.id));
+      const survivors = new Set(t.doc.objects.map((o) => o.id));
+      for (const c of t.doc.clips) c.tracks = c.tracks.filter((tr) => survivors.has(tr.objectId));
       touchDoc(t.doc);
       await this.persist(t, 'delete');
     }

@@ -47,6 +47,10 @@ export class SyncEngine {
   private selfColor = '#4ade80';
   private disposed = false;
   private pendingWrite: Promise<boolean> = Promise.resolve(true);
+  /** `projects.version` as last observed (pull/ensure) or last written. CAS base
+   * for durable pushes. `doc.cloudVersion` stays the *content* claim — only
+   * advanced when a whole-doc push succeeded. */
+  private observedHead = 0;
 
   constructor(private session: EditorSession) {}
 
@@ -67,6 +71,7 @@ export class SyncEngine {
       this.lockSweep = setInterval(() => this.sweepLocks(), 10000);
       // reconcile: pull cloud, compare with local
       const cloud = await SyncEngine.pullStandalone(this.session.doc.id);
+      if (cloud) this.observedHead = Math.max(this.observedHead, cloud.version);
       if (cloud && cloud.updatedAt > this.session.doc.updatedAt && cloud.version !== this.session.doc.version) {
         this.session.pendingRecovery = cloud;
         this.session.syncError.set('Cloud has a newer revision. Resolve the sync conflict before saving.');
@@ -97,8 +102,11 @@ export class SyncEngine {
       // Adopt a local/guest project only after the server accepted its creation.
       doc.ownerId = u.id;
       await sb.from('project_members').insert({ project_id: doc.id, user_id: u.id, role: 'owner' }).throwOnError();
+      // The row we just created holds exactly this revision — the head for future CAS writes.
+      this.observedHead = doc.version;
     } else {
       doc.ownerId = existing.owner_id;
+      this.observedHead = Math.max(this.observedHead, existing.version ?? 0);
     }
     const { data: me } = await sb.from('project_members').select('role').eq('project_id', doc.id).eq('user_id', u.id).maybeSingle().throwOnError();
     const role: TeamRole = doc.ownerId === u.id ? 'owner' : (me?.role ?? 'viewer');
@@ -209,18 +217,54 @@ export class SyncEngine {
         if (error) throw error;
         thumbnailUrl = sb.storage.from('thumbnails').getPublicUrl(path).data.publicUrl;
       }
-      await sb.from('projects').update({ name: doc.name, version: doc.version, thumbnail_url: thumbnailUrl })
-        .eq('id', doc.id).select('id').single().throwOnError();
+      // Compare-and-swap on the cloud head revision we last observed. Without
+      // this, a whole-doc push from device A silently overwrote a peer's
+      // newer work (including anything A's undo had rolled back).
+      const base = this.observedHead;
+      const { data: updated } = await sb.from('projects')
+        .update({ name: doc.name, version: doc.version, thumbnail_url: thumbnailUrl })
+        .eq('id', doc.id).eq('version', base).select('id').maybeSingle().throwOnError();
+      if (!updated) {
+        return this.resolveVersionConflict(doc, base);
+      }
       doc.cloudVersion = doc.version;
+      this.observedHead = doc.version;
       this.session.syncError.set(null);
       return true;
     } catch (e) {
       console.warn('cloud push failed, queueing', e);
       this.session.syncError.set(cloudErrorMessage(e));
-      // One current snapshot per project, not an unbounded duplicate on every retry.
-      await localDb.enqueue({ id: `push:${doc.id}`, projectId: doc.id, kind: 'push', payload: doc, createdAt: nowIso(), attempts: 0 });
+      await this.queuePush(doc);
       return false;
     }
+  }
+
+  /** A peer saved since our base revision. Surface the conflict through the
+   * existing recovery modal (keep mine / use cloud) instead of overwriting —
+   * and keep our work safely queued. */
+  private async resolveVersionConflict(doc: ProjectDoc, base: number): Promise<boolean> {
+    const cloud = await SyncEngine.pullStandalone(doc.id).catch(() => null);
+    if (cloud && cloud.version === doc.version) {
+      // Our own write actually landed (e.g. a retried push after a lost
+      // response) — the row already holds this revision; count it as synced.
+      this.observedHead = doc.version;
+      this.session.syncError.set(null);
+      await localDb.clearQueue((await localDb.listQueue(doc.id)).filter((op) => op.kind === 'push').map((op) => op.id));
+      return true;
+    }
+    this.session.syncError.set('Someone else saved this project first — resolve the sync conflict before pushing again.');
+    await this.queuePush(doc);
+    if (cloud) {
+      this.observedHead = cloud.version; // "keep mine" then CASes against the real head
+      this.session.pendingRecovery = cloud;
+      this.session.onRecovery?.(this.session.doc, cloud);
+    }
+    return false;
+  }
+
+  private async queuePush(doc: ProjectDoc): Promise<void> {
+    // One current snapshot per project, not an unbounded duplicate on every retry.
+    await localDb.enqueue({ id: `push:${doc.id}`, projectId: doc.id, kind: 'push', payload: doc, createdAt: nowIso(), attempts: 0 });
   }
 
   static async pullStandalone(projectId: string): Promise<ProjectDoc | null> {

@@ -91,6 +91,8 @@ export function trackValueOf(obj: SceneObjectData, property: AnimTrack['property
 export class Playback {
   playing = false;
   frame = 0;
+  /** When false, playback halts on the last frame instead of wrapping. */
+  loop = true;
   private acc = 0;
 
   constructor(
@@ -125,7 +127,14 @@ export class Playback {
     this.acc += dt * fps;
     let f = this.frame + Math.floor(this.acc);
     this.acc -= Math.floor(this.acc);
-    if (f > len) f = 0; // loop
+    if (f > len) {
+      if (this.loop) {
+        f = 0;
+      } else {
+        this.playing = false;
+        f = len;
+      }
+    }
     if (f !== this.frame) {
       this.frame = f;
       this.onSample(this.frame);
