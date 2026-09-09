@@ -312,11 +312,13 @@ function renderGhDetected(s: EditorSession, el: HTMLElement, repo: GhRepo, branc
       try {
         const me = auth.user.get();
         const { doc, blobs, missing } = await importStudioProject(repo.owner, repo.name, branch, det, me?.id ?? 'guest');
-        // persist asset blobs locally
+        // persist asset blobs locally — texture bytes must NOT be tagged
+        // model/gltf-binary or decode paths lose the distinction
         for (const [key, buf] of blobs) {
           if (!key.startsWith('asset:')) continue;
           const assetId = key.slice(6);
-          await localDb.saveBlob(assetId, new Blob([buf], { type: 'model/gltf-binary' }));
+          const mime = doc.assets.find((a) => a.id === assetId)?.mime || 'model/gltf-binary';
+          await localDb.saveBlob(assetId, new Blob([buf], { type: mime }));
         }
         await localDb.saveProject(doc);
         closeModal();
@@ -339,7 +341,8 @@ function renderGhDetected(s: EditorSession, el: HTMLElement, repo: GhRepo, branc
         const { doc, blobs, missing } = await importStudioProject(repo.owner, repo.name, branch, det, me?.id ?? 'guest');
         for (const [key, buf] of blobs) {
           if (!key.startsWith('asset:')) continue;
-          await localDb.saveBlob(key.slice(6), new Blob([buf], { type: 'model/gltf-binary' }));
+          const mime = doc.assets.find((a) => a.id === key.slice(6))?.mime || 'model/gltf-binary';
+          await localDb.saveBlob(key.slice(6), new Blob([buf], { type: mime }));
         }
         s.history.checkpoint(s.doc, 'GitHub merge');
         for (const m of doc.materials) if (!s.doc.materials.some((x) => x.id === m.id)) s.doc.materials.push(m);
@@ -350,6 +353,7 @@ function renderGhDetected(s: EditorSession, el: HTMLElement, repo: GhRepo, branc
           s.viewport.addObject(o);
         }
         s.rebuildFromDoc();
+        await s.hydrateTextures(); // merged materials may carry base-color maps
         s.markDirty('import');
         closeModal();
         toast(missing.length ? `Merged with ${missing.length} missing file(s)` : 'Project merged into scene', missing.length ? 'warn' : 'success');

@@ -2,7 +2,17 @@ import type { EditorSession } from '../editor/session.js';
 import type { LightData, SceneObjectData } from '../state/models.js';
 import * as THREE from 'three';
 import { escapeHtml, pickFiles } from '../lib/utils.js';
+import { isWithinSubtree } from '../state/tree.js';
 import { toast } from './toast.js';
+
+/** Copy/paste hand-off buffer (cross-tab via the system clipboard too). */
+interface TransformClipboard {
+  version: 1;
+  position: [number, number, number];
+  rotationDeg: [number, number, number];
+  scale: [number, number, number];
+}
+let xfer: TransformClipboard | null = null;
 
 export function buildInspector(s: EditorSession, el: HTMLElement): () => void {
   function numRow(label: string, vals: [number, number, number], step: number): string {
@@ -100,9 +110,13 @@ export function buildInspector(s: EditorSession, el: HTMLElement): () => void {
         <label class="field">Parent
           <select id="insp-parent" class="input">
             <option value="">— Scene root —</option>
-            ${s.doc.objects.filter((x) => x.id !== o.id).map((x) => `<option value="${x.id}"${x.id === o.parentId ? ' selected' : ''}>${escapeHtml(x.name)}</option>`).join('')}
+            ${s.doc.objects
+              // offering a descendant here used to let users freeze the tab (parent cycle)
+              .filter((x) => x.id !== o.id && !isWithinSubtree(s.doc.objects, o.id, x.id))
+              .map((x) => `<option value="${x.id}"${x.id === o.parentId ? ' selected' : ''}>${escapeHtml(x.name)}</option>`).join('')}
           </select>
         </label>
+        ${o.type === 'group' ? '<button class="btn btn-sm" data-io="ungroup">Ungroup</button>' : ''}
       </div>
       <div class="prop-card">
         <div class="prop-card-head">
@@ -115,6 +129,11 @@ export function buildInspector(s: EditorSession, el: HTMLElement): () => void {
         ${numRow('Position', [o.position.x, o.position.y, o.position.z], 0.1)}
         ${numRow('Rotation°', [d(o.rotation.x), d(o.rotation.y), d(o.rotation.z)], 1)}
         ${numRow('Scale', [o.scale.x, o.scale.y, o.scale.z], 0.05)}
+        <div class="prop-actions" style="margin-top:8px">
+          <button class="btn btn-sm" data-io="reset">Reset</button>
+          <button class="btn btn-sm" data-io="copyxf">Copy</button>
+          <button class="btn btn-sm" data-io="pastexf"${xfer ? '' : ' disabled'}>Paste</button>
+        </div>
       </div>
       ${o.type === 'light' ? lightSection(o.light ?? null) : materialSection(o, mat)}`;
 
@@ -249,6 +268,34 @@ export function buildInspector(s: EditorSession, el: HTMLElement): () => void {
       lock: () => s.toggleLock(o.id),
       dup: () => s.duplicateObject(o.id),
       del: () => s.deleteObject(o.id),
+      ungroup: () => s.ungroupObject(o.id),
+      reset: () => {
+        s.history.checkpoint(s.doc, 'Reset transform');
+        s.setTransform(o.id, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 });
+        toast('Transform reset', 'success');
+      },
+      copyxf: async () => {
+        xfer = {
+          version: 1,
+          position: [o.position.x, o.position.y, o.position.z],
+          rotationDeg: [THREE.MathUtils.radToDeg(o.rotation.x), THREE.MathUtils.radToDeg(o.rotation.y), THREE.MathUtils.radToDeg(o.rotation.z)],
+          scale: [o.scale.x, o.scale.y, o.scale.z],
+        };
+        try { await navigator.clipboard.writeText(`web3ds.transform:${JSON.stringify(xfer)}`); } catch { /* clipboard optional in non-secure contexts */ }
+        toast('Transform copied', 'success');
+        render();
+      },
+      pastexf: () => {
+        if (!xfer) { toast('Copy a transform first', 'warn'); return; }
+        s.history.checkpoint(s.doc, 'Paste transform');
+        s.setTransform(
+          o.id,
+          { x: xfer.position[0], y: xfer.position[1], z: xfer.position[2] },
+          { x: xfer.rotationDeg[0], y: xfer.rotationDeg[1], z: xfer.rotationDeg[2] },
+          { x: xfer.scale[0], y: xfer.scale[1], z: xfer.scale[2] },
+        );
+        toast('Transform pasted', 'success');
+      },
       newmat: () => {
         const m = s.addMaterial();
         s.assignMaterial(o.id, m.id);

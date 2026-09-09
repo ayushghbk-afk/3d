@@ -1,14 +1,18 @@
 import { deepClone } from '../lib/utils.js';
 import type { ProjectDoc } from '../state/models.js';
 
-// Snapshot-ring undo/redo. Snapshots cover objects/materials/clips/scripts
-// (lightweight; blobs/assets referenced by id).
+// Snapshot-ring undo/redo. Snapshots cover objects/materials/clips/scripts/
+// assets. Assets must be part of the snapshot: undoing a GLB import used to
+// leave the AssetMeta behind (orphaned rows that then shipped in every GitHub
+// export), and undoing a delete could restore an object whose asset metadata
+// was gone — the classic "missing asset bytes" warning.
 interface Snap {
   label: string;
   objects: ProjectDoc['objects'];
   materials: ProjectDoc['materials'];
   clips: ProjectDoc['clips'];
   scripts: ProjectDoc['scripts'];
+  assets: ProjectDoc['assets'];
 }
 
 export class History {
@@ -26,6 +30,7 @@ export class History {
       materials: deepClone(doc.materials),
       clips: deepClone(doc.clips),
       scripts: deepClone(doc.scripts ?? []),
+      assets: deepClone(doc.assets ?? []),
     };
   }
 
@@ -58,6 +63,7 @@ export class History {
     doc.materials = s.materials;
     doc.clips = s.clips;
     doc.scripts = s.scripts ?? [];
+    doc.assets = s.assets ?? [];
     this.onChange?.();
     return true;
   }
@@ -70,6 +76,7 @@ export class History {
     doc.materials = s.materials;
     doc.clips = s.clips;
     doc.scripts = s.scripts ?? [];
+    doc.assets = s.assets ?? [];
     this.onChange?.();
     return true;
   }

@@ -12,6 +12,7 @@ import {
   type PrimitiveType, type ProjectDoc, type SceneObjectData, type SceneScript,
   type ScriptTrigger,
 } from '../state/models.js';
+import { collectSubtree, isWithinSubtree } from '../state/tree.js';
 import { activeClip, deleteKeyframeAt, setKeyframe, trackValueOf } from './animation.js';
 
 export const SCRIPT_MAX_CODE = 80_000;
@@ -649,8 +650,11 @@ export function createHeadlessHost(
       return o;
     },
     deleteObject: (id) => {
-      const ids = new Set([id, ...doc.objects.filter((o) => o.parentId === id).map((o) => o.id)]);
+      // subtree, not just direct children — same semantics as EditorSession
+      const ids = new Set(collectSubtree(doc.objects, id).map((o) => o.id));
       doc.objects = doc.objects.filter((o) => !ids.has(o.id));
+      const survivors = new Set(doc.objects.map((o) => o.id));
+      for (const c of doc.clips) c.tracks = c.tracks.filter((t) => survivors.has(t.objectId));
       if (selected && ids.has(selected)) selected = null;
       touch(doc);
       persist();
@@ -680,6 +684,10 @@ export function createHeadlessHost(
       const o = doc.objects.find((x) => x.id === childId);
       if (!o || childId === parentId) return;
       if (parentId) findObject(doc, parentId);
+      // reject cycles: parent inside the child's own subtree (would hang rendering)
+      if (parentId && isWithinSubtree(doc.objects, childId, parentId)) {
+        throw new Error('Cannot parent an object inside itself');
+      }
       o.parentId = parentId;
       o.version++;
       touch(doc);

@@ -253,6 +253,10 @@ export function mountDashboard(root: HTMLElement): () => void {
               if (error) throw error;
               if (!data?.length) throw new Error('Only a project owner or admin can delete this cloud project.');
             }
+            // purge asset blobs too — otherwise deleted projects leaked GLB and
+            // texture bytes in IndexedDB forever (the Agent API path already did this)
+            const gone = await localDb.getProject(id);
+            if (gone) for (const a of gone.assets) await localDb.deleteBlob(a.id).catch(() => undefined);
             await localDb.deleteProject(id);
             await localDb.clearQueue((await localDb.listQueue(id)).map((op) => op.id));
             toast('Project deleted', 'success');

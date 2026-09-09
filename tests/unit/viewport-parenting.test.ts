@@ -72,4 +72,20 @@ describe('attachToParent', () => {
     expect(obj.parent).toBe(scene);
     expect(snapshot(obj).p).toEqual([4, 5, 6]);
   });
+  it('refuses to attach a node inside its own subtree (cycle defense)', () => {
+    const scene = new THREE.Scene();
+    const objects = new Map<string, THREE.Object3D>();
+    const a = placed('a', null, [1, 0, 0]);
+    const b = placed('b', 'a', [2, 0, 0]);
+    objects.set('a', a.obj);
+    objects.set('b', b.obj);
+    attachToParent(objects, scene, a.data);
+    attachToParent(objects, scene, b.data); // b under a
+    // corrupted data now claims a.parentId = b → would loop forever on updateMatrixWorld
+    attachToParent(objects, scene, { id: 'a', parentId: 'b' });
+    expect(a.obj.parent).toBe(scene);
+    expect(b.obj.parent).toBe(a.obj);
+    scene.updateMatrixWorld(true); // must terminate (a cycle here would hang)
+    expect(b.obj.matrix.elements[12]).toBe(2); // locals untouched
+  });
 });

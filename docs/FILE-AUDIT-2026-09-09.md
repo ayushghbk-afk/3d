@@ -1,5 +1,11 @@
 # File-by-file audit — 2026-09-09
 
+> **Resolution update (same day, this branch):** §1.1–§1.7 and most of §2 are now
+> implemented — see the table at the bottom (§7). 209 unit tests pass.
+> Playwright browser verification still can't run in this sandbox (Chromium
+> download is TLS-blocked), and the §1.7 import-side mapping + light export,
+> §2.3 mesh editing, §2.5 zoom/key-drag and §2.7–2.8 remain open.
+
 Concrete follow-up to the product review. Every claim below was verified against this
 checkout (baseline: `tsc --noEmit` clean, 194 unit/PG tests passing). Review items are
 mapped to `file:line`; ✅ = already implemented (don't rebuild), ⚠️ = exists but broken
@@ -274,3 +280,29 @@ Unit additions: `history.test.ts` (assets in snapshots), `session.test.ts`
 
 Items 1–6 are bug fixes with observable "disappears after refresh/export" symptoms — ship
 them as one PR series before touching features 7+. Each already has a matching test in §4.
+
+---
+
+## 7. Resolution status — implemented on `arena/01a0864e-3d`
+
+| Audit item | Fix | Verified by |
+|---|---|---|
+| §1.1 highlight leak | `EditorSession.withHighlightOff()` wraps GLB export **and** autosave thumbnails | code review (sync, non-UI logic) |
+| §1.2 undo overwrites peers | `sync.ts`: `observedHead` compare-and-swap on `projects.version` (`PATCH … .eq('version', head)`); conflict → pull → recovery modal; idempotent-retry path when the row already holds our revision | `sync.test.ts` ×2 new |
+| §1.3 assets outside history | `history.ts` snapshots include `doc.assets`; undo/redo restore them | `group.test.ts` |
+| §1.4 delete orphans grandchildren | shared `state/tree.ts` `collectSubtree()`; `deleteObject` removes the full subtree, prunes animation tracks, and broadcasts every removed id (peers converge) | `group.test.ts` ×2 |
+| §1.5 parent-cycle freeze | `isWithinSubtree()` guard in `session.setParent`, scripts `scene.setParent`, and agent `object.update`; inspector dropdown hides descendants; `viewport.attachToParent` refuses to create THREE cycles even for pre-existing corrupt saves | `group.test.ts`, `viewport-parenting.test.ts` |
+| §1.6 GitHub texture round-trip | `importStudioProject` now consumes `assets.json` (`DetectedProject.assetsJson`), re-downloads textures, remaps `object.assetId` **and** `material.mapAssetId`; legacy repos keep the old filename fallback; blobs persist with their real mime; merge flow hydrates maps immediately | typecheck + code review (network path mocked elsewhere) |
+| §1.7 GLB motion | `exportGlb` writes real glTF animations via `docClipsToAnimationClips` (quaternion-converted rotation, step-key hold baking, unique `exportNodeName` targets); export runs from the **document** pose, not the scrubbed viewport; orphan parents no longer vanish from the file. Still open: import-side clip→track mapping, lights (`KHR_lights_punctual`) | `glb-anim.test.ts` ×5 |
+| §2.1 dead snap API | 🧲 Snap toggle in the tool rail (`session.snap` store → `gizmo.setSnap`, persisted in IndexedDB settings) | manual (preview) |
+| §2.2 inspector actions | Reset / Copy / Paste Transform (clipboard string form, works cross-tab) + Ungroup on groups | manual (preview) |
+| group button honesty | Rail "Group" now wraps the current selection (`groupSelection()`); empty selection still just adds a group | `group.test.ts` |
+| duplicate honesty | `duplicateObject` copies the subtree with remapped parents | `group.test.ts` |
+| §2.5 loop | `Playback.loop` + 🔁 timeline toggle (stops on last frame when off) | typecheck; loop wrap logic unchanged when on |
+| mobile sheet stacking | Bottom bar split into 🗂 Scene / ⋮ Props; opening one closes the other | manual (preview) |
+| key leak through modals | Space no longer toggles playback with a modal open | code review |
+| gizmo-button poll | `setInterval(500ms)` → store subscriptions; undo button now shows the undo label as its tooltip | code review |
+| dashboard blob leak | Project delete purges IndexedDB asset blobs (matches the Agent-API path) | code review |
+| reparent on fresh objects | `reparentData` refreshes **both** world matrices before baking (freshly added objects had an identity `matrixWorld` — the exact trap documented in `viewport.ts`) | `group.test.ts` |
+
+Not yet done (intentionally): outliner `prompt()` rename & DnD parenting (deferred — native drag is unusable on touch, which is this app's primary input), timeline zoom/key-drag, asset panel, quality tiers, GLB import animation mapping.

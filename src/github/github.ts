@@ -35,6 +35,7 @@ export interface DetectedProject {
   basePath: string; // '' = repo root
   projectJson?: string;
   sceneJson?: string;
+  assetsJson?: string;
   models: GhTreeItem[];
   textures: GhTreeItem[];
   others: GhTreeItem[];
@@ -178,10 +179,12 @@ export function detectProject(tree: GhTreeItem[]): DetectedProject {
     const pj = base ? `${base}/project.json` : 'project.json';
     const sj = base ? `${base}/scene.json` : 'scene.json';
     if (byPath.has(pj) || byPath.has(sj)) {
+      const aj = base ? `${base}/assets.json` : 'assets.json';
       return {
         kind: 'studio', basePath: base,
         projectJson: byPath.has(pj) ? pj : undefined,
         sceneJson: byPath.has(sj) ? sj : undefined,
+        assetsJson: byPath.has(aj) ? aj : undefined,
         models: tree.filter((t) => MODEL_EXT.some((e) => t.path.toLowerCase().endsWith(e))),
         textures: tree.filter((t) => TEX_EXT.some((e) => t.path.toLowerCase().endsWith(e))),
         others: [],
@@ -225,32 +228,84 @@ export async function importStudioProject(
       if (frag.scripts?.length) doc.scripts = frag.scripts.map((s) => ({ ...s, enabled: false }));
     }
   }
-  // fetch referenced model blobs (match by filename)
-  for (const m of det.models.slice(0, 25)) {
+  // Manifest path: assets.json maps studio asset ids to repo files. This is
+  // the only route that restores TEXTURES (material.mapAssetId), and it beats
+  // filename guessing for models. Without it, "GitHub → Import → Edit →
+  // Export → Re-import" silently dropped every material map (audit §1.6).
+  const idRemap = new Map<string, string>();
+  interface ManifestAsset { id: string; name: string; kind: string; mime: string; size: number; file: string }
+  let manifest: { assets?: ManifestAsset[] } | null = null;
+  if (det.assetsJson) {
     try {
-      const buf = await downloadFile(owner, repo, branch, m.path);
-      blobs.set(m.path, buf);
-    } catch {
-      missing.push(m.path);
+      manifest = JSON.parse(await downloadText(owner, repo, branch, det.assetsJson)) as { assets?: ManifestAsset[] };
+    } catch { manifest = null; }
+  }
+  if (manifest?.assets?.length) {
+    const fileIndex = new Map<string, GhTreeItem>();
+    for (const t of [...det.models, ...det.textures]) fileIndex.set(t.path, t);
+    for (const a of manifest.assets.slice(0, 60)) {
+      const kind = a.kind === 'texture' ? 'texture' : a.kind === 'model' ? 'model' : null;
+      if (!kind || !a.id) continue;
+      const item = fileIndex.get(a.file);
+      if (!item) { missing.push(`asset file for "${a.name}"`); continue; }
+      try {
+        const buf = await downloadFile(owner, repo, branch, item.path);
+        const newId = uid();
+        doc.assets.push({
+          id: newId, name: a.name || item.path.split('/').pop() || 'asset', kind,
+          mime: a.mime || (kind === 'texture' ? 'image/png' : 'model/gltf-binary'),
+          size: buf.byteLength, storagePath: null, local: true, thumb: null, createdAt: new Date().toISOString(),
+        });
+        blobs.set(`asset:${newId}`, buf);
+        idRemap.set(a.id, newId);
+      } catch {
+        missing.push(item.path);
+      }
     }
   }
-  // attach blobs to imported objects by filename match
-  for (const o of doc.objects) {
-    if (o.type !== 'imported') continue;
-    const assetName = doc.assets.find((a) => a.id === o.assetId)?.name;
-    const hit = [...blobs.keys()].find((p) => (assetName && p.endsWith(assetName)) || p.toLowerCase().includes(o.name.toLowerCase().replace(/\s+/g, '-')));
-    if (hit) {
-      const assetId = uid();
-      const buf = blobs.get(hit) as ArrayBuffer;
-      doc.assets.push({
-        id: assetId, name: hit.split('/').pop() ?? 'model.glb', kind: 'model',
-        mime: 'model/gltf-binary', size: buf.byteLength, storagePath: null, local: true, thumb: null, createdAt: new Date().toISOString(),
-      });
-      blobs.set(`asset:${assetId}`, buf);
-      o.assetId = assetId;
-    } else {
-      missing.push(`asset for "${o.name}"`);
+  if (!idRemap.size) {
+    // legacy repos without assets.json: download model blobs, match by filename
+    for (const m of det.models.slice(0, 25)) {
+      try {
+        const buf = await downloadFile(owner, repo, branch, m.path);
+        blobs.set(m.path, buf);
+      } catch {
+        missing.push(m.path);
+      }
     }
+    // attach blobs to imported objects by filename match
+    for (const o of doc.objects) {
+      if (o.type !== 'imported') continue;
+      const assetName = doc.assets.find((a) => a.id === o.assetId)?.name;
+      const hit = [...blobs.keys()].find((p) => (assetName && p.endsWith(assetName)) || p.toLowerCase().includes(o.name.toLowerCase().replace(/\s+/g, '-')));
+      if (hit) {
+        const assetId = uid();
+        const buf = blobs.get(hit) as ArrayBuffer;
+        doc.assets.push({
+          id: assetId, name: hit.split('/').pop() ?? 'model.glb', kind: 'model',
+          mime: 'model/gltf-binary', size: buf.byteLength, storagePath: null, local: true, thumb: null, createdAt: new Date().toISOString(),
+        });
+        blobs.set(`asset:${assetId}`, buf);
+        o.assetId = assetId;
+      } else {
+        missing.push(`asset for "${o.name}"`);
+      }
+    }
+  } else {
+    for (const o of doc.objects) {
+      if (o.type !== 'imported' || !o.assetId) continue;
+      const remapped = idRemap.get(o.assetId);
+      if (remapped) o.assetId = remapped;
+      else if (!doc.assets.some((a) => a.id === o.assetId)) missing.push(`asset for "${o.name}"`);
+    }
+  }
+  // material textures: remap (or drop dangling ids so the viewport doesn't
+  // try to hydrate a map that no longer exists)
+  for (const m of doc.materials) {
+    if (!m.mapAssetId) continue;
+    const remapped = idRemap.get(m.mapAssetId);
+    if (remapped) m.mapAssetId = remapped;
+    else if (!doc.assets.some((a) => a.id === m.mapAssetId)) m.mapAssetId = null;
   }
   return { doc, blobs, missing };
 }
