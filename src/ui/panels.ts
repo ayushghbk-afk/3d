@@ -160,6 +160,7 @@ export function openShortcutsModal(): void {
     ['Ctrl/⌘ + S', 'Save now'],
     ['Space', 'Play / pause'],
     ['A', 'Toggle ✨ AI Studio (draggable, resizable)'],
+    ['J', 'Toggle Scripts (control meshes, keyframes, camera)'],
     ['Drag panel edges', 'Resize outliner / inspector / timeline'],
     ['Double-click panel edge', 'Collapse / restore panel'],
     ['1-finger drag', 'Orbit (touch)'],

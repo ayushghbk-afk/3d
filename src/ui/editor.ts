@@ -53,6 +53,8 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
       togglePlay();
     } else if (e.key.toLowerCase() === 'a' && !document.getElementById('modal-root')?.hasChildNodes()) {
       openAi(session);
+    } else if (e.key.toLowerCase() === 'j' && !document.getElementById('modal-root')?.hasChildNodes()) {
+      openScripts(session);
     } else if (e.key === '?') {
       openShortcutsModal();
     }
@@ -69,6 +71,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
         <span id="tb-presence" class="presence"></span>
         <button id="tb-members" class="btn btn-sm">People</button>
         <button id="tb-ai" class="btn btn-sm" title="AI Studio — toggle (A). Drag, resize, collapse.">AI Studio</button>
+        <button id="tb-scripts" class="btn btn-sm" title="Scene scripts — control meshes, keyframes, camera (J).">Scripts</button>
         <button id="tb-github" class="btn btn-sm">GitHub</button>
         <button id="tb-menu" class="btn btn-sm">More</button>
       </header>
@@ -231,6 +234,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     };
     (root.querySelector('#tb-members') as HTMLButtonElement).onclick = () => openMembersModal(s);
     (root.querySelector('#tb-ai') as HTMLButtonElement).onclick = () => openAi(s);
+    (root.querySelector('#tb-scripts') as HTMLButtonElement).onclick = () => openScripts(s);
     (root.querySelector('#tb-github') as HTMLButtonElement).onclick = () => openGithubMenu(s);
     (root.querySelector('#tb-menu') as HTMLButtonElement).onclick = () => openEditorMenu(s, togglePlay);
     updateGizmoButtons();
@@ -258,6 +262,7 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
     });
     setEditorSession(null);
     closeFloatWin('ai-studio');
+    closeFloatWin('scripts');
     session?.dispose();
     session = null;
     root.innerHTML = '';
@@ -401,6 +406,7 @@ function openEditorMenu(s: EditorSession, togglePlay: () => void): void {
   const items: { label: string; fn: () => void }[] = [
     { label: 'Save now', fn: () => void s.forceSave().then(() => toast('Saved', 'success')) },
     { label: 'Open AI Studio', fn: () => openAi(s) },
+    { label: 'Open Scripts', fn: () => openScripts(s) },
     { label: 'Import GLB', fn: () => void importGlb(s) },
     { label: 'Export GLB', fn: () => void s.exportGlb() },
     { label: 'GitHub import / export', fn: () => openGithubMenu(s) },
@@ -434,6 +440,10 @@ function openAi(s: EditorSession): void {
   // Floating ✨ AI Studio: toggleable — pressing ✨ AI / A again hides it to
   // reveal the 3D scene; it also collapses and remembers its position/size.
   void import('./ai-panel.js').then(({ toggleAiPanel }) => toggleAiPanel(s));
+}
+
+function openScripts(s: EditorSession): void {
+  void import('./script-panel.js').then(({ toggleScriptPanel }) => toggleScriptPanel(s));
 }
 
 function openGithubMenu(s: EditorSession): void {

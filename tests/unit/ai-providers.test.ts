@@ -12,6 +12,8 @@ import { findSf3dDeps, parseRunButtonValue } from '../../src/ai/sf3d.js';
 import { scanOutputsForFile } from '../../src/ai/gradio.js';
 import { planProcedural } from '../../src/ai/procedural.js';
 import { defaultSettings, normalizeSettings } from '../../src/ai/settings.js';
+import { GROQ_DEFAULT_MODEL, GROQ_PROXY_URL, GroqProxyChatProvider, groqChatUrls, parseGroqReply } from '../../src/ai/groq.js';
+import { getChatProvider } from '../../src/ai/factory.js';
 
 describe('pollinations URL builder', () => {
   it('encodes the prompt and defaults sensibly', () => {
@@ -188,7 +190,9 @@ describe('procedural plans', () => {
 describe('AI settings', () => {
   it('defaults to free providers with the agent disabled', () => {
     const d = defaultSettings();
-    expect(d.assistantProvider).toBe('pollinations');
+    expect(d.assistantProvider).toBe('groq');
+    expect(d.groqProxyUrl).toContain('groq-proxy.mr-hackerdon808.workers.dev');
+    expect(d.groqModel).toBe('llama-3.3-70b-versatile');
     expect(d.imageProvider).toBe('pollinations');
     expect(d.meshProvider).toBe('sf3d');
     expect(d.agent.enabled).toBe(false);
@@ -320,5 +324,49 @@ describe('pollinations chat chain', () => {
   it('appends the user key to image URLs when set', () => {
     expect(buildPollinationsImageUrl('cat', { key: 'sk_test' })).toContain('key=sk_test');
     expect(buildPollinationsImageUrl('cat', {})).not.toContain('key=');
+  });
+});
+
+describe('Groq proxy assistant', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('posts OpenAI chat completions to the proxy and parses the reply', async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({ choices: [{ message: { content: '  hello from llama  ' } }] }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await new GroqProxyChatProvider().chat([{ role: 'user', content: 'hi' }]);
+    expect(out).toBe('hello from llama');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${GROQ_PROXY_URL}/`);
+    expect((init as { method?: string }).method).toBe('POST');
+    const body = JSON.parse(String((init as { body: string }).body)) as { model: string };
+    expect(body.model).toBe(GROQ_DEFAULT_MODEL);
+  });
+
+  it('skips the health payload and tries the next path', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(Response.json({ ok: true, service: 'groq-proxy', message: 'Worker is online. Use POST for AI requests.' }))
+        .mockResolvedValueOnce(Response.json({ choices: [{ message: { content: 'ok' } }] })),
+    );
+    const out = await new GroqProxyChatProvider().chat([{ role: 'user', content: 'hi' }]);
+    expect(out).toBe('ok');
+  });
+
+  it('lists chat URLs and ignores health JSON', () => {
+    expect(groqChatUrls(GROQ_PROXY_URL)[0]).toBe(`${GROQ_PROXY_URL}/`);
+    expect(parseGroqReply({ ok: true, service: 'groq-proxy' })).toBeNull();
+    expect(parseGroqReply({ choices: [{ message: { content: 'x' } }] })).toBe('x');
+  });
+
+  it('is the default chat provider', () => {
+    expect(getChatProvider(defaultSettings()).id).toBe('groq-proxy');
   });
 });

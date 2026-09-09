@@ -8,23 +8,24 @@
 // - HEADLESS: no editor open → mutations apply to the IndexedDB copy directly
 //   (loads in full when the project is opened; cloud sync runs on open).
 import {
-  createProjectDoc, defaultClip, defaultLight, defaultMaterial, defaultObject, normalizeDoc,
-  type AnimTrack, type LightKind, type MaterialData, type ObjectType, type PrimitiveType,
-  type ProjectDoc, type ProjectMode, type SceneObjectData,
+  createProjectDoc, defaultCamera, defaultClip, defaultLight, defaultMaterial, defaultObject, defaultScript, normalizeDoc,
+  type AnimTrack, type CameraState, type LightKind, type MaterialData, type ObjectType, type PrimitiveType,
+  type ProjectDoc, type ProjectMode, type SceneObjectData, type ScriptTrigger,
 } from '../state/models.js';
 import { localDb } from '../lib/indexeddb.js';
 import { uid, nowIso } from '../lib/utils.js';
 import { toAiContext, toProjectJson, toSceneJson } from '../editor/serialization.js';
 import { deleteKeyframeAt, setKeyframe, trackValueOf } from '../editor/animation.js';
+import { createHeadlessHost, runScriptCode, SCRIPT_MAX_CODE, SCRIPT_MAX_COUNT } from '../editor/scripts.js';
 import { analyzeScene, planPaint, planTidy } from './scene-iq.js';
 import { answerLocally } from './local-answer.js';
 import { aiSettings, logActivity, verifyAgentToken } from './settings.js';
-import { generateImageSmart, generateMeshSmart, getChatProvider } from './factory.js';
+import { chatSmart, generateImageSmart, generateMeshSmart } from './factory.js';
 import { texturePrompt } from './pollinations.js';
 import { blobToDataUrl } from './providers.js';
 import type { AgentScope, AgentSessionLike, AgentTokenMeta, AgentTransport } from './types.js';
 
-export const AGENT_API_VERSION = '1.0.0';
+export const AGENT_API_VERSION = '1.1.0';
 
 export class AgentError extends Error {
   code: string;
@@ -115,6 +116,7 @@ function shortDoc(doc: ProjectDoc): Record<string, unknown> {
     materials: doc.materials.length,
     clips: doc.clips.length,
     assets: doc.assets.length,
+    scripts: (doc.scripts ?? []).length,
   };
 }
 
@@ -289,6 +291,7 @@ export class AgentAPI {
         mesh: s.meshProvider,
       },
       transports: ['page', 'postmessage', 'channel', 'relay'],
+      apis: ['agent', 'textures'],
     };
   }
 
@@ -891,13 +894,12 @@ export class AgentAPI {
     const question = str(p, 'question', true, 4000);
     const id = optStr(p, 'projectId', 120) || undefined;
     const t = await this.resolve(id);
-    const chat = getChatProvider();
     const context = toAiContext(t.doc).slice(0, 6000);
     try {
-      const answer = await chat.chat([
+      const answer = await chatSmart([
         {
           role: 'system',
-          content: `You are the Web 3D Studio assistant. Answer briefly about the user's 3D project below. When suggesting edits, name exact Agent API methods (object.add, object.update, material.update, ...).\n\n${context}`,
+          content: `You are the Web 3D Studio assistant. Answer briefly about the user's 3D project below. When suggesting edits, name exact Agent API methods (object.add, object.update, material.update, script.add, script.run, camera.set, texture.generate, ...). Users can add scene scripts (restricted JavaScript) that move meshes, set keyframes and camera angles, add models and generate textures.\n\n${context}`,
         },
         { role: 'user', content: question },
       ]);
@@ -940,6 +942,8 @@ export class AgentAPI {
     const seamless = p.seamless === undefined ? true : bool(p, 'seamless');
     const size = p.size === undefined ? 512 : num(p, 'size', true, 64, 2048);
     const materialId = optStr(p, 'materialId', 120);
+    const objectId = optStr(p, 'objectId', 120);
+    if (objectId) findObject(t.doc, objectId);
     const { result, fallback } = await generateImageSmart(texturePrompt(prompt, seamless), {
       width: size, height: size, strict: bool(p, 'strict'),
     });
@@ -948,13 +952,14 @@ export class AgentAPI {
       let matId = materialId;
       if (matId) findMaterial(t.doc, matId);
       else {
-        const mat = t.session.addMaterial();
+        const mat = t.session.addMaterial(prompt.slice(0, 32) || 'AI texture');
         t.session.updateMaterial(mat.id, { name: `${prompt.slice(0, 32) || 'AI texture'}` });
         matId = mat.id;
       }
       await t.session.uploadTexture(matId as string, file);
+      if (objectId) t.session.assignMaterial(objectId, matId as string);
       return {
-        mode: t.mode, materialId: matId, seed: result.seed,
+        mode: t.mode, materialId: matId, seed: result.seed, objectId: objectId ?? null,
         provider: result.provider, fallback,
         thumb: t.doc.materials.find((m) => m.id === matId)?.mapAssetId
           ? (t.doc.assets.find((a) => a.id === t.doc.materials.find((m) => m.id === matId)?.mapAssetId)?.thumb ?? null)
@@ -977,9 +982,14 @@ export class AgentAPI {
     const mat = findMaterial(t.doc, matId as string);
     mat.mapAssetId = assetId;
     mat.updatedAt = nowIso();
+    if (objectId) {
+      const obj = findObject(t.doc, objectId);
+      obj.materialId = matId;
+      obj.version++;
+    }
     touchDoc(t.doc);
     await this.persist(t, 'material');
-    return { mode: t.mode, materialId: matId, seed: result.seed, provider: result.provider, fallback };
+    return { mode: t.mode, materialId: matId, seed: result.seed, objectId: objectId ?? null, provider: result.provider, fallback };
   }
 
   private async m_model_generate(p: Params): Promise<unknown> {
@@ -1041,6 +1051,286 @@ export class AgentAPI {
       objectIds, provider: 'procedural-mesh', fallback: outcome.fallback,
     };
   }
+
+  // ===================================================================
+  // methods: texture API (second public API) + camera + playback + scripts
+  // ===================================================================
+
+  private async m_texture_capabilities(): Promise<unknown> {
+    const s = aiSettings.get();
+    return {
+      version: AGENT_API_VERSION,
+      api: 'textures',
+      provider: s.imageProvider,
+      methods: [
+        { name: 'texture.capabilities', scope: 'none', summary: 'Texture API health + provider.' },
+        { name: 'texture.list', scope: 'read', summary: 'List texture assets in a project.' },
+        { name: 'texture.generate', scope: 'generate', summary: 'Text → texture on a material / object.' },
+        { name: 'texture.apply', scope: 'write', summary: 'Apply an existing texture asset to a material / object.' },
+      ],
+    };
+  }
+
+  private async m_texture_list(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    return {
+      mode: t.mode,
+      projectId: t.doc.id,
+      textures: t.doc.assets.filter((a) => a.kind === 'texture'),
+      materials: t.doc.materials.map((m) => ({ id: m.id, name: m.name, mapAssetId: m.mapAssetId, baseColor: m.baseColor })),
+    };
+  }
+
+  private async m_texture_apply(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const assetId = str(p, 'assetId', true, 120);
+    const asset = t.doc.assets.find((a) => a.id === assetId);
+    if (!asset || asset.kind !== 'texture') throw new AgentError('NOT_FOUND', `Texture asset ${assetId} not found.`);
+    let materialId = optStr(p, 'materialId', 120);
+    const objectId = optStr(p, 'objectId', 120);
+    if (objectId) findObject(t.doc, objectId);
+    if (t.mode === 'live' && t.session) {
+      if (!materialId) {
+        const mat = t.session.addMaterial(asset.name.replace(/\.[a-z0-9]+$/i, '') || 'Texture');
+        materialId = mat.id;
+      } else findMaterial(t.doc, materialId);
+      const mat = t.doc.materials.find((m) => m.id === materialId);
+      if (mat) {
+        mat.mapAssetId = assetId;
+        t.session.updateMaterial(materialId, { mapAssetId: assetId });
+      }
+      if (objectId) t.session.assignMaterial(objectId, materialId);
+      return { mode: t.mode, materialId, objectId: objectId ?? null, assetId };
+    }
+    if (!materialId) {
+      const mat = defaultMaterial(asset.name.replace(/\.[a-z0-9]+$/i, '') || 'Texture');
+      t.doc.materials.push(mat);
+      materialId = mat.id;
+    }
+    const mat = findMaterial(t.doc, materialId);
+    mat.mapAssetId = assetId;
+    mat.updatedAt = nowIso();
+    if (objectId) {
+      const obj = findObject(t.doc, objectId);
+      obj.materialId = materialId;
+      obj.version++;
+    }
+    touchDoc(t.doc);
+    await this.persist(t, 'material');
+    return { mode: t.mode, materialId, objectId: objectId ?? null, assetId };
+  }
+
+  private readCamera(t: { mode: string; session: AgentSessionLike | null; doc: ProjectDoc }): CameraState {
+    if (t.mode === 'live' && t.session) return t.session.getCamera();
+    return t.doc.settings.camera ?? defaultCamera();
+  }
+
+  private async m_camera_get(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    return { mode: t.mode, camera: this.readCamera(t) };
+  }
+
+  private async m_camera_set(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const type = optStr(p, 'type', 20) as CameraState['type'] | undefined;
+    if (type && type !== 'perspective' && type !== 'orthographic') {
+      throw new AgentError('VALIDATION', 'type must be "perspective" or "orthographic".');
+    }
+    const position = vec(p, 'position');
+    const target = vec(p, 'target');
+    const fov = p.fov === undefined ? undefined : num(p, 'fov', true, 10, 120);
+    const patch: Partial<CameraState> = {
+      ...(type ? { type } : {}),
+      ...(position ? { position: { x: position.x ?? 0, y: position.y ?? 0, z: position.z ?? 0 } } : {}),
+      ...(target ? { target: { x: target.x ?? 0, y: target.y ?? 0, z: target.z ?? 0 } } : {}),
+      ...(fov !== undefined ? { fov } : {}),
+    };
+    if (t.mode === 'live' && t.session) {
+      t.session.setCamera(patch, true);
+      return { mode: t.mode, camera: t.session.getCamera() };
+    }
+    const cur = t.doc.settings.camera ?? defaultCamera();
+    if (patch.type) cur.type = patch.type;
+    if (patch.position) cur.position = { ...cur.position, ...patch.position };
+    if (patch.target) cur.target = { ...cur.target, ...patch.target };
+    if (patch.fov !== undefined) cur.fov = patch.fov;
+    t.doc.settings.camera = cur;
+    touchDoc(t.doc);
+    await this.persist(t, 'camera');
+    return { mode: t.mode, camera: cur };
+  }
+
+  private async m_camera_lookAt(p: Params): Promise<unknown> {
+    const target = vec(p, 'target') ?? { x: num(p, 'x', false), y: num(p, 'y', false), z: num(p, 'z', false) };
+    return this.m_camera_set({ ...p, target: { x: target.x ?? 0, y: target.y ?? 0, z: target.z ?? 0 } });
+  }
+
+  private async m_camera_orbit(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const azimuth = num(p, 'azimuthDeg', true, -1e6, 1e6);
+    const polar = num(p, 'polarDeg', true, 1, 179);
+    const distance = p.distance === undefined ? undefined : num(p, 'distance', true, 0.1, 200);
+    if (t.mode === 'live' && t.session) {
+      t.session.orbitCamera(azimuth, polar, distance);
+      return { mode: t.mode, camera: t.session.getCamera() };
+    }
+    const cam = t.doc.settings.camera ?? defaultCamera();
+    const tgt = cam.target;
+    const az = (azimuth * Math.PI) / 180;
+    const pol = (polar * Math.PI) / 180;
+    const dist = distance ?? Math.hypot(cam.position.x - tgt.x, cam.position.y - tgt.y, cam.position.z - tgt.z) ?? 8;
+    cam.position = {
+      x: tgt.x + dist * Math.sin(pol) * Math.sin(az),
+      y: tgt.y + dist * Math.cos(pol),
+      z: tgt.z + dist * Math.sin(pol) * Math.cos(az),
+    };
+    t.doc.settings.camera = cam;
+    touchDoc(t.doc);
+    await this.persist(t, 'camera');
+    return { mode: t.mode, camera: cam };
+  }
+
+  private async m_camera_focus(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const objectId = optStr(p, 'objectId', 120) ?? optStr(p, 'id', 120);
+    if (objectId) findObject(t.doc, objectId);
+    if (t.mode === 'live' && t.session) {
+      t.session.focus(objectId ?? null);
+      return { mode: t.mode, camera: t.session.getCamera() };
+    }
+    return { mode: t.mode, camera: this.readCamera(t), note: 'Focus needs a live editor; camera unchanged.' };
+  }
+
+  private async m_playback_get(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    if (t.mode === 'live' && t.session) return { mode: t.mode, playback: t.session.getPlayback() };
+    const clip = t.doc.clips.find((c) => c.id === t.doc.activeClipId) ?? t.doc.clips[0];
+    return { mode: t.mode, playback: { playing: false, frame: 0, length: clip?.length ?? 90, fps: clip?.fps ?? 30 } };
+  }
+
+  private async m_playback_set(p: Params): Promise<unknown> {
+    const live = this.liveSession();
+    if (!live) throw new AgentError('NO_SESSION', 'Playback needs an open editor.');
+    if (p.playing === true) live.play();
+    if (p.playing === false) live.pause();
+    if (p.frame !== undefined) live.setFrame(num(p, 'frame', true, 0, 2000));
+    return { playback: live.getPlayback() };
+  }
+
+  private async m_script_list(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    return {
+      mode: t.mode,
+      projectId: t.doc.id,
+      scripts: (t.doc.scripts ?? []).map((s) => ({
+        id: s.id, name: s.name, trigger: s.trigger, enabled: s.enabled,
+        updatedAt: s.updatedAt, chars: s.code.length,
+      })),
+    };
+  }
+
+  private async m_script_get(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const id = str(p, 'id', true, 120);
+    const s = (t.doc.scripts ?? []).find((x) => x.id === id);
+    if (!s) throw new AgentError('NOT_FOUND', `Script ${id} not found.`);
+    return { mode: t.mode, script: s };
+  }
+
+  private parseTrigger(raw: string | undefined): ScriptTrigger {
+    const v = (raw ?? 'manual') as ScriptTrigger;
+    if (!['manual', 'open', 'play', 'frame'].includes(v)) {
+      throw new AgentError('VALIDATION', 'trigger must be manual, open, play or frame.');
+    }
+    return v;
+  }
+
+  private async m_script_add(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    if ((t.doc.scripts ?? []).length >= SCRIPT_MAX_COUNT) {
+      throw new AgentError('VALIDATION', `At most ${SCRIPT_MAX_COUNT} scripts per project.`);
+    }
+    const name = optStr(p, 'name', 80) ?? `Script ${(t.doc.scripts ?? []).length + 1}`;
+    const code = p.code === undefined ? undefined : str(p, 'code', true, SCRIPT_MAX_CODE);
+    const trigger = this.parseTrigger(optStr(p, 'trigger', 20));
+    const enabled = bool(p, 'enabled', false);
+    if (t.mode === 'live' && t.session) {
+      const script = t.session.addScript({ name, code, trigger, enabled });
+      return { mode: t.mode, script };
+    }
+    const script = defaultScript(name);
+    if (code !== undefined) script.code = code;
+    script.trigger = trigger;
+    script.enabled = enabled;
+    t.doc.scripts.push(script);
+    touchDoc(t.doc);
+    await this.persist(t, 'script');
+    return { mode: t.mode, script };
+  }
+
+  private async m_script_update(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const id = str(p, 'id', true, 120);
+    const patch: { name?: string; code?: string; enabled?: boolean; trigger?: ScriptTrigger } = {};
+    const name = optStr(p, 'name', 80);
+    if (name) patch.name = name;
+    if (p.code !== undefined) patch.code = str(p, 'code', true, SCRIPT_MAX_CODE);
+    if (p.enabled !== undefined) patch.enabled = bool(p, 'enabled');
+    if (p.trigger !== undefined) patch.trigger = this.parseTrigger(optStr(p, 'trigger', 20));
+    if (t.mode === 'live' && t.session) {
+      return { mode: t.mode, script: t.session.updateScript(id, patch) };
+    }
+    const s = (t.doc.scripts ?? []).find((x) => x.id === id);
+    if (!s) throw new AgentError('NOT_FOUND', `Script ${id} not found.`);
+    Object.assign(s, patch, { updatedAt: nowIso() });
+    touchDoc(t.doc);
+    await this.persist(t, 'script');
+    return { mode: t.mode, script: s };
+  }
+
+  private async m_script_delete(p: Params): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const id = str(p, 'id', true, 120);
+    if (t.mode === 'live' && t.session) {
+      t.session.deleteScript(id);
+      return { mode: t.mode, deleted: id };
+    }
+    const before = (t.doc.scripts ?? []).length;
+    t.doc.scripts = (t.doc.scripts ?? []).filter((s) => s.id !== id);
+    if (t.doc.scripts.length === before) throw new AgentError('NOT_FOUND', `Script ${id} not found.`);
+    touchDoc(t.doc);
+    await this.persist(t, 'script');
+    return { mode: t.mode, deleted: id };
+  }
+
+  private async m_script_run(p: Params, ctx: AgentContext): Promise<unknown> {
+    const t = await this.resolve(optStr(p, 'projectId', 120) || undefined);
+    const id = optStr(p, 'id', 120);
+    const code = p.code === undefined ? undefined : str(p, 'code', true, SCRIPT_MAX_CODE);
+    if (!id && !code) throw new AgentError('VALIDATION', 'Pass script id or code.');
+    const canGenerate = !ctx.token || ctx.token.scopes.includes('generate');
+    if (t.mode === 'live' && t.session) {
+      const prev = t.session.canGenerate;
+      t.session.canGenerate = canGenerate;
+      try {
+        const result = id && !code ? await t.session.runScript(id) : await t.session.runAdhoc(code as string);
+        if (!result.ok) throw new AgentError('VALIDATION', result.error ?? 'Script failed.');
+        return { mode: t.mode, ...result };
+      } finally {
+        t.session.canGenerate = prev;
+      }
+    }
+    const src = code ?? (t.doc.scripts ?? []).find((s) => s.id === id)?.code;
+    if (!src) throw new AgentError('NOT_FOUND', id ? `Script ${id} not found.` : 'Missing code.');
+    const host = createHeadlessHost(t.doc, {
+      canGenerate,
+      persist: () => { void this.persist(t, 'script'); },
+    });
+    const result = await runScriptCode(src, host, { scriptId: id ?? 'adhoc', allowHeavy: true });
+    if (!result.ok) throw new AgentError('VALIDATION', result.error ?? 'Script failed.');
+    await this.persist(t, 'script');
+    return { mode: t.mode, ...result };
+  }
 }
 
 // ---------- registry ----------
@@ -1055,7 +1345,11 @@ export type AgentMethod =
   | 'clip.list' | 'clip.add' | 'keyframe.add' | 'keyframe.delete'
   | 'scene.analyze' | 'scene.autopaint' | 'scene.autotexture' | 'scene.tidy'
   | 'history.undo' | 'history.redo' | 'save.now'
-  | 'ai.ask' | 'image.generate' | 'texture.generate' | 'model.generate';
+  | 'ai.ask' | 'image.generate' | 'texture.generate' | 'texture.list' | 'texture.apply' | 'texture.capabilities'
+  | 'model.generate'
+  | 'camera.get' | 'camera.set' | 'camera.lookAt' | 'camera.orbit' | 'camera.focus'
+  | 'playback.get' | 'playback.set'
+  | 'script.list' | 'script.get' | 'script.add' | 'script.update' | 'script.delete' | 'script.run';
 
 const METHOD_SCOPES: Record<AgentMethod, AgentScope | 'none'> = {
   'agent.ping': 'none',
@@ -1092,7 +1386,23 @@ const METHOD_SCOPES: Record<AgentMethod, AgentScope | 'none'> = {
   'ai.ask': 'generate',
   'image.generate': 'generate',
   'texture.generate': 'generate',
+  'texture.list': 'read',
+  'texture.apply': 'write',
+  'texture.capabilities': 'none',
   'model.generate': 'generate',
+  'camera.get': 'read',
+  'camera.set': 'write',
+  'camera.lookAt': 'write',
+  'camera.orbit': 'write',
+  'camera.focus': 'write',
+  'playback.get': 'read',
+  'playback.set': 'write',
+  'script.list': 'read',
+  'script.get': 'read',
+  'script.add': 'write',
+  'script.update': 'write',
+  'script.delete': 'write',
+  'script.run': 'write',
 };
 
 const METHOD_DOCS: Record<AgentMethod, string> = {
@@ -1129,6 +1439,22 @@ const METHOD_DOCS: Record<AgentMethod, string> = {
   'save.now': 'Save now (local + cloud when signed in). Params: {projectId?}.',
   'ai.ask': 'Ask the assistant about the project. Params: {projectId?, question}. Factual scene questions fall back to an offline answer (offline:true) when the cloud AI is unreachable.',
   'image.generate': 'Text → image data URL (free Flux by default). Params: {prompt, width?, height?, seed?, strict?}.',
-  'texture.generate': 'Text → texture applied to a material. Params: {projectId?, prompt, materialId?, size?, seamless?, strict?}.',
+  'texture.generate': 'Text → texture applied to a material (and optionally an object). Params: {projectId?, prompt, materialId?, objectId?, size?, seamless?, strict?}. Also window.Web3DStudio.textures.generate.',
+  'texture.list': 'List texture assets + materials. Params: {projectId?}.',
+  'texture.apply': 'Assign an existing texture asset to a material/object. Params: {projectId?, assetId, materialId?, objectId?}.',
+  'texture.capabilities': 'Texture API health + provider. No auth.',
   'model.generate': 'Text → GLB imported into the scene (free Stable Fast 3D by default, TripoSR fallback). Params: {projectId?, prompt, name?, quality?, model?, strict?}.',
+  'camera.get': 'Viewport camera pose. Params: {projectId?}.',
+  'camera.set': 'Set camera position / target / fov / type. Params: {projectId?, position?, target?, fov?, type?}.',
+  'camera.lookAt': 'Aim the camera. Params: {projectId?, target?} or {x,y,z}.',
+  'camera.orbit': 'Spherical orbit around the look-at target. Params: {projectId?, azimuthDeg, polarDeg, distance?}.',
+  'camera.focus': 'Frame an object (live editor). Params: {projectId?, objectId?}.',
+  'playback.get': 'Playhead state. Params: {projectId?}.',
+  'playback.set': 'Play / pause / scrub (live editor). Params: {playing?, frame?}.',
+  'script.list': 'List scene scripts. Params: {projectId?}.',
+  'script.get': 'Get a script including source. Params: {projectId?, id}.',
+  'script.add': 'Add a scene script (restricted JS). Params: {projectId?, name?, code?, trigger?, enabled?}.',
+  'script.update': 'Patch a script. Params: {projectId?, id, name?, code?, trigger?, enabled?}.',
+  'script.delete': 'Delete a script. Params: {projectId?, id}.',
+  'script.run': 'Run a stored script or ad-hoc code. Params: {projectId?, id?, code?}.',
 };

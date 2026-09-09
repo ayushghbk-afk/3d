@@ -1,5 +1,5 @@
 // Provider interfaces + shared HTTP helpers. Concrete providers live in
-// pollinations.ts (free), triposr.ts (free 3D), custom.ts (user endpoints)
+// groq.ts (default Ask), pollinations.ts (free images + chat fallback), triposr.ts (free 3D), custom.ts (user endpoints)
 // and procedural.ts (offline fallback).
 import type { AgentMessage, ChatOptions, ImageGenOptions, ImageGenResult, MeshGenOptions, MeshGenResult } from './types.js';
 

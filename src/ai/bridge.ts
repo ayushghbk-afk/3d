@@ -50,15 +50,30 @@ function isOriginAllowed(origin: string): boolean {
 
 export function installWindowBridge(api: AgentAPI): void {
   const w = window as unknown as Record<string, unknown>;
+  const call = (method: string, params?: Record<string, unknown>, token?: string) =>
+    api.authorizedCall(method, params ?? {}, 'page', token ?? null);
   const agent = {
-    version: '1.0.0',
+    version: '1.1.0',
     methods: api.methods(),
     /** agent.call('object.list', {projectId}, 'w3d_token...') */
-    call: (method: string, params?: Record<string, unknown>, token?: string) =>
-      api.authorizedCall(method, params ?? {}, 'page', token ?? null),
-    capabilities: () => api.authorizedCall('agent.capabilities', {}, 'page', null),
+    call,
+    capabilities: () => call('agent.capabilities'),
   };
-  w.Web3DStudio = { ...(w.Web3DStudio as object | undefined), agent };
+  /** Dedicated texture-generator API (the "other" API beside the Agent API). */
+  const textures = {
+    version: '1.1.0',
+    generate: (params?: Record<string, unknown>, token?: string) => call('texture.generate', params, token),
+    list: (params?: Record<string, unknown>, token?: string) => call('texture.list', params, token),
+    apply: (params?: Record<string, unknown>, token?: string) => call('texture.apply', params, token),
+    capabilities: () => call('texture.capabilities'),
+  };
+  const scripts = {
+    version: '1.1.0',
+    list: (params?: Record<string, unknown>, token?: string) => call('script.list', params, token),
+    add: (params?: Record<string, unknown>, token?: string) => call('script.add', params, token),
+    run: (params?: Record<string, unknown>, token?: string) => call('script.run', params, token),
+  };
+  w.Web3DStudio = { ...(w.Web3DStudio as object | undefined), agent, textures, scripts };
   // Legacy alias kept stable for scripts written against early docs.
   w.__WEB3D_AGENT__ = agent;
   bridgeStatus.set({ ...bridgeStatus.get(), page: true });
@@ -146,6 +161,12 @@ export function snippetJs(token: string): string {
     ``,
     `// Add a red cube to the open project:`,
     `await agent.call('object.add', { kind: 'cube', name: 'Agent Cube', color: '#ff4444' }, '${token}');`,
+    ``,
+    `// Texture API (same token) — generate + apply to a mesh:`,
+    `await window.Web3DStudio.textures.generate({ prompt: 'lava rock', size: 512 }, '${token}');`,
+    ``,
+    `// Scene script — add a mesh and set the camera:`,
+    `await agent.call('script.run', { code: "scene.add({ kind: 'cube', name: 'Spin' }); scene.camera.orbit(40, 35, 8);" }, '${token}');`,
   ].join('\n');
 }
 

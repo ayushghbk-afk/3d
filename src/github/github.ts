@@ -222,6 +222,7 @@ export async function importStudioProject(
         doc.activeClipId = frag.clips[0].id;
       }
       if (frag.settings) doc.settings = frag.settings;
+      if (frag.scripts?.length) doc.scripts = frag.scripts.map((s) => ({ ...s, enabled: false }));
     }
   }
   // fetch referenced model blobs (match by filename)

@@ -4,7 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { createRenderer, detectCaps, type GpuCaps } from './renderer.js';
 import { makePrimitiveGeometry, disposeGeometry } from './geometry.js';
 import { MaterialManager } from './materials.js';
-import type { CameraType, MaterialData, SceneObjectData, ShadingMode } from '../state/models.js';
+import type { CameraState, CameraType, MaterialData, SceneObjectData, ShadingMode } from '../state/models.js';
 
 export interface ViewportEvents {
   onSelect: (id: string | null) => void;
@@ -186,13 +186,67 @@ export class Viewport {
     if (this.cameraType === t) return;
     // carry position/target across
     const from = this.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+    const target = this.controls.target.clone();
     this.cameraType = t;
     const to = this.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera;
     to.position.copy(from.position);
     this.controls.dispose();
     this.controls = this.makeControls(to);
-    this.controls.target.set(0, 0, 0);
+    this.controls.target.copy(target);
+    this.controls.update();
     this.resize();
+  }
+
+  getCameraState(): CameraState {
+    const cam = this.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+    const t = this.controls.target;
+    return {
+      type: this.cameraType,
+      position: { x: cam.position.x, y: cam.position.y, z: cam.position.z },
+      target: { x: t.x, y: t.y, z: t.z },
+      fov: this.perspCam.fov,
+    };
+  }
+
+  setCameraState(patch: Partial<CameraState>): CameraState {
+    if (patch.type && patch.type !== this.cameraType) this.setCameraType(patch.type);
+    const cam = this.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+    if (patch.position) {
+      cam.position.set(
+        patch.position.x ?? cam.position.x,
+        patch.position.y ?? cam.position.y,
+        patch.position.z ?? cam.position.z,
+      );
+    }
+    if (patch.target) {
+      this.controls.target.set(
+        patch.target.x ?? this.controls.target.x,
+        patch.target.y ?? this.controls.target.y,
+        patch.target.z ?? this.controls.target.z,
+      );
+    }
+    if (typeof patch.fov === 'number' && Number.isFinite(patch.fov)) {
+      this.perspCam.fov = Math.max(10, Math.min(120, patch.fov));
+      this.perspCam.updateProjectionMatrix();
+    }
+    this.controls.update();
+    return this.getCameraState();
+  }
+
+  /** Spherical orbit around the current look-at target. polarDeg: 0 = top, 90 = horizon. */
+  orbitCamera(azimuthDeg: number, polarDeg: number, distance?: number): CameraState {
+    const t = this.controls.target;
+    const cam = this.camera as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+    const az = (azimuthDeg * Math.PI) / 180;
+    const pol = (Math.max(1, Math.min(179, polarDeg)) * Math.PI) / 180;
+    const dist = distance ?? cam.position.distanceTo(t) ?? 8;
+    cam.position.set(
+      t.x + dist * Math.sin(pol) * Math.sin(az),
+      t.y + dist * Math.cos(pol),
+      t.z + dist * Math.sin(pol) * Math.cos(az),
+    );
+    this.controls.update();
+    return this.getCameraState();
   }
 
   setShading(mode: ShadingMode, baseEnv = 1): void {

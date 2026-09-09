@@ -92,7 +92,7 @@ export interface AgentSessionLike {
     scl?: Partial<import('../state/models.js').SceneObjectData['scale']>,
   ): void;
   updateLight(id: string, patch: Partial<import('../state/models.js').LightData>): void;
-  addMaterial(): import('../state/models.js').MaterialData;
+  addMaterial(name?: string): import('../state/models.js').MaterialData;
   updateMaterial(id: string, patch: Partial<import('../state/models.js').MaterialData>): void;
   assignMaterial(objectId: string, materialId: string | null): void;
   importGlbBytes(name: string, buf: ArrayBuffer, filename?: string): Promise<import('../state/models.js').SceneObjectData | null>;
@@ -105,4 +105,20 @@ export interface AgentSessionLike {
   applyPaint(
     items: { objectId: string; materialName: string; patch: Partial<import('../state/models.js').MaterialData> }[],
   ): { objectId: string; materialId: string }[];
+  getCamera(): import('../state/models.js').CameraState;
+  setCamera(patch: Partial<import('../state/models.js').CameraState>, persist?: boolean): void;
+  orbitCamera(azimuthDeg: number, polarDeg: number, distance?: number): void;
+  focus(id: string | null): void;
+  play(): void;
+  pause(): void;
+  stop(): void;
+  setFrame(n: number): void;
+  getPlayback(): { playing: boolean; frame: number; length: number; fps: number };
+  addScript(patch?: Partial<import('../state/models.js').SceneScript>): import('../state/models.js').SceneScript;
+  updateScript(id: string, patch: Partial<Pick<import('../state/models.js').SceneScript, 'name' | 'code' | 'enabled' | 'trigger'>>): import('../state/models.js').SceneScript;
+  deleteScript(id: string): void;
+  runScript(id: string): Promise<{ ok: boolean; scriptId: string; logs: string[]; error?: string; ms: number }>;
+  runAdhoc(code: string): Promise<{ ok: boolean; scriptId: string; logs: string[]; error?: string; ms: number }>;
+  generateTexture(prompt: string, opts?: { materialId?: string; objectId?: string; size?: number; seamless?: boolean }): Promise<{ materialId: string; provider: string; seed: number }>;
+  canGenerate: boolean;
 }

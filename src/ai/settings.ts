@@ -5,6 +5,7 @@ import { localDb } from '../lib/indexeddb.js';
 import { Store } from '../state/store.js';
 import { uid, nowIso } from '../lib/utils.js';
 import type { AgentActivityEntry, AgentScope, AgentTokenMeta } from './types.js';
+import { GROQ_DEFAULT_MODEL, GROQ_PROXY_URL } from './groq.js';
 
 export interface CustomEndpoint {
   baseUrl: string;
@@ -14,9 +15,12 @@ export interface CustomEndpoint {
 
 export interface AiSettings {
   version: 1;
-  /** Free default: Pollinations text (OpenAI-compatible, no key). */
-  assistantProvider: 'pollinations' | 'custom';
+  /** Default: Groq Llama via the public proxy (no browser key). */
+  assistantProvider: 'groq' | 'pollinations' | 'custom';
   assistantCustom: CustomEndpoint;
+  /** Groq proxy base (no trailing path). Empty = built-in default. */
+  groqProxyUrl: string;
+  groqModel: string;
   /** Free default: Pollinations Flux image endpoint (no key). */
   imageProvider: 'pollinations' | 'custom';
   imageCustom: CustomEndpoint;
@@ -58,7 +62,9 @@ function env(name: string): string {
 export function defaultSettings(): AiSettings {
   return {
     version: 1,
-    assistantProvider: 'pollinations',
+    assistantProvider: 'groq',
+    groqProxyUrl: env('VITE_GROQ_PROXY_URL') || GROQ_PROXY_URL,
+    groqModel: env('VITE_GROQ_MODEL') || GROQ_DEFAULT_MODEL,
     assistantCustom: {
       baseUrl: env('VITE_AI_ASSISTANT_URL') || 'https://api.openai.com/v1',
       apiKey: env('VITE_AI_ASSISTANT_KEY'),
@@ -114,7 +120,15 @@ export function normalizeSettings(raw: unknown): AiSettings {
     : [];
   return {
     version: 1,
-    assistantProvider: s.assistantProvider === 'custom' ? 'custom' : 'pollinations',
+    assistantProvider:
+      s.assistantProvider === 'custom' ? 'custom'
+        : s.assistantProvider === 'pollinations' ? 'pollinations'
+          : 'groq',
+    groqProxyUrl:
+      typeof s.groqProxyUrl === 'string' && s.groqProxyUrl.trim()
+        ? s.groqProxyUrl.trim().replace(/\/+$/, '')
+        : d.groqProxyUrl,
+    groqModel: typeof s.groqModel === 'string' && s.groqModel.trim() ? s.groqModel.trim() : d.groqModel,
     assistantCustom: custom(s.assistantCustom, d.assistantCustom),
     imageProvider: s.imageProvider === 'custom' ? 'custom' : 'pollinations',
     imageCustom: custom(s.imageCustom, d.imageCustom),

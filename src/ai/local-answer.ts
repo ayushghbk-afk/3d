@@ -43,7 +43,7 @@ function sceneSummary(doc: ProjectDoc): string {
     `"${doc.name}" has ${c.objects.length} object${c.objects.length === 1 ? '' : 's'}` +
     ` (${c.meshes.length} meshes, ${c.lights.length} lights, ${c.groups.length} groups), ` +
     `${mats.length} material${mats.length === 1 ? '' : 's'}, ${clips.length} clip${clips.length === 1 ? '' : 's'}` +
-    ` with ${keyframes} keyframes. Mode: ${doc.mode}, version ${doc.version}.`
+    ` with ${keyframes} keyframes, ${(doc.scripts ?? []).length} script${(doc.scripts ?? []).length === 1 ? '' : 's'}. Mode: ${doc.mode}, version ${doc.version}.`
   );
 }
 
@@ -74,6 +74,7 @@ export function answerLocally(doc: ProjectDoc, question: string): string | null 
     if (/material|texture|color/.test(q)) return `There are ${mats.length} materials in "${doc.name}".`;
     if (/group/.test(q)) return `There are ${c.groups.length} groups in "${doc.name}".`;
     if (/clip|animation/.test(q)) return `There are ${clips.length} animation clips in "${doc.name}".`;
+    if (/script/.test(q)) return `There are ${(doc.scripts ?? []).length} scene script${(doc.scripts ?? []).length === 1 ? '' : 's'} in "${doc.name}".`;
     if (/mesh|object|model|part|thing|item/.test(q) || /how many/.test(q)) {
       return `There are ${c.objects.length} objects in "${doc.name}" (${c.meshes.length} meshes, ${c.lights.length} lights, ${c.groups.length} groups).`;
     }
