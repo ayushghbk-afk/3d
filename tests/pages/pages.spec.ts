@@ -9,7 +9,7 @@ test('loads only built assets within the GitHub Pages directory', async ({ page,
   page.on('request', (req) => { if (/\.(js|css)(\?|$)/.test(req.url())) assets.push(new URL(req.url()).pathname); });
   await page.goto('./');
   await expect(page.locator('#cloud-badge')).toContainText('Cloud (signed out)');
-  await expect(page.getByRole('button', { name: '+ New Project', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Start blank', exact: true })).toBeVisible();
   expect(assets.length).toBeGreaterThan(1);
   expect(assets.every((path) => path.startsWith('/3d/assets/'))).toBe(true);
   expect(errors).toEqual([]);
@@ -28,7 +28,7 @@ test('creates a local project, loads the lazy editor, and reopens it offline und
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('./');
-  await page.getByRole('button', { name: '+ New Project', exact: true }).click();
+  await page.getByRole('button', { name: 'Start blank', exact: true }).click();
   await page.locator('#np-name').fill('Pages smoke test');
   await page.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(page.locator('#tb-name')).toContainText('Pages smoke test');
