@@ -108,6 +108,9 @@ Editor → **✨ AI** opens AI Studio:
   collapse via the arrow button or double-click; the layout is remembered.
 - **Every dialog** (menus, GitHub, members, shortcuts…) drags by its title bar
   and resizes by its corner.
+- **Fullscreen** (⛶ in the toolbar, **More**, or `F11`) hides the browser chrome.
+  After a moment of idle the editor tools auto-hide so the 3D view fills the
+  screen; move the mouse or tap **Show tools** to bring them back. `Esc` exits.
 
 ## Scripts
 

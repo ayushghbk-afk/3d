@@ -97,7 +97,7 @@ ai/
 server/agent-relay.mjs  zero-dep localhost HTTP relay for external agents
 ui/
   router, toast, dashboard, editor shell, outliner, inspector, toolbar,
-  timeline, modals, github-modal
+  timeline, modals, github-modal, chrome.ts (fullscreen + auto-hide tools)
 workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 ```
 
