@@ -232,7 +232,7 @@ let playing = false, grounded = false, yaw = 0, pitch = 0;
 const velocity = new THREE.Vector3();
 const keys = new Set();
 const look = { id: null, x: 0, y: 0 };
-const move = { x: 0, y: 0 };
+const move = { id: null, x: 0, y: 0 };
 
 const playBtn = document.getElementById('playBtn');
 const exitBtn = document.getElementById('exitBtn');
@@ -302,12 +302,12 @@ padEl.addEventListener('pointerdown', (e) => {
   move.id = e.pointerId; padEl.setPointerCapture(e.pointerId); movePad(e);
 });
 padEl.addEventListener('pointermove', (e) => { if (move.id === e.pointerId) movePad(e); });
-padEl.addEventListener('pointerup', () => { move.id = null; move.x = 0; move.y = 0; padEl.firstElementChild.style.transform = ''; });
+padEl.addEventListener('pointerup', () => { move.id = null; move.x = 0; move.y = 0; if (padEl.firstElementChild) padEl.firstElementChild.style.transform = ''; });
 function movePad(e) {
   const r = padEl.getBoundingClientRect();
   move.x = Math.max(-1, Math.min(1, ((e.clientX - r.left) / r.width - 0.5) * 2));
   move.y = Math.max(-1, Math.min(1, ((e.clientY - r.top) / r.height - 0.5) * 2));
-  padEl.firstElementChild.style.transform = \`translate(\${move.x * 40}px, \${move.y * 40}px)\`;
+  if (padEl.firstElementChild) padEl.firstElementChild.style.transform = \`translate(\${move.x * 40}px, \${move.y * 40}px)\`;
 }
 jumpEl.addEventListener('click', () => { if (playing && grounded) { velocity.y = 6.5; grounded = false; } });
 renderer.domElement.addEventListener('pointerdown', (e) => { if (playing && isTouch) { look.id = e.pointerId; look.x = e.clientX; look.y = e.clientY; } });
