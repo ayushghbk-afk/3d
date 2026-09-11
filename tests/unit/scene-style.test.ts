@@ -108,10 +108,15 @@ describe('applyStyle', () => {
   it('is idempotent (restyling twice is a no-op)', () => {
     const doc = docWithContent();
     const style = styleById('clay');
+    // `updatedAt` is a wall-clock stamp, so compare the styling only
+    const snapshot = (): unknown => ({
+      m: doc.materials.map(({ updatedAt: _updatedAt, ...rest }) => rest),
+      s: doc.settings,
+    });
     applyStyle(doc, style);
-    const snapshot = JSON.stringify({ m: doc.materials, s: doc.settings });
+    const first = JSON.stringify(snapshot());
     applyStyle(doc, style);
-    expect(JSON.stringify({ m: doc.materials, s: doc.settings })).toBe(snapshot);
+    expect(JSON.stringify(snapshot())).toBe(first);
   });
 
   it('only makes a share of the materials emissive', () => {
