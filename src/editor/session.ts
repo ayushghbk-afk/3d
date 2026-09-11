@@ -1,16 +1,18 @@
 import * as THREE from 'three';
 import { Viewport } from '../engine/viewport.js';
-import { TransformGizmo } from '../engine/transform.js';
+import { TransformGizmo, type GizmoSpace } from '../engine/transform.js';
+import { TransformRig, type PivotMode } from './transform-rig.js';
 import { parseGlb, exportGlb, docClipsToAnimationClips, exportNodeName } from '../engine/gltf.js';
 import { History } from './history.js';
 import { Playback, activeClip, setKeyframe, deleteKeyframeAt, samplePose, trackValueOf } from './animation.js';
 import { SyncEngine } from './sync.js';
 import { Store } from '../state/store.js';
 import {
-  defaultMaterial, defaultObject, defaultClip, defaultScript, createProjectDoc, normalizeDoc,
+  defaultMaterial, defaultObject, defaultClip, defaultScript, createProjectDoc, normalizeDoc, defaultSnap,
   type AnimTrack, type CameraState, type LightData, type LightKind, type MaterialData, type ObjectType, type PrimitiveType,
-  type ProjectDoc, type ProjectMode, type SceneObjectData, type SceneScript, type ScriptTrigger, type ShadingMode,
-  type TransformMode, type CameraType, type PresenceUser,
+  type ProjectDoc, type ProjectMode, type SceneObjectData, type SceneScript, type ScriptTrigger, type ShadingMode, type Vec3,
+  type ActivityEntry,
+  type TransformMode, type CameraType, type PresenceUser, type SnapSettings,
 } from '../state/models.js';
 import { localDb } from '../lib/indexeddb.js';
 import { auth } from '../lib/auth.js';
@@ -21,17 +23,50 @@ import { generateImageSmart, generateMeshSmart } from '../ai/factory.js';
 import { texturePrompt } from '../ai/pollinations.js';
 import { ScriptEngine, SCRIPT_MAX_CODE, SCRIPT_MAX_COUNT, type ScriptHost, type ScriptRunResult } from './scripts.js';
 import { collectSubtree, isWithinSubtree } from '../state/tree.js';
+import { SelectionStore } from '../state/selection.js';
+import { selectionOps, type SelectionOps } from './selection-ops.js';
+import { transformOps, type TransformOps } from './transform-ops.js';
+import { sceneOps, type SceneOps } from './scene-ops.js';
+import { animationOps, type AnimationOps } from './animation-ops.js';
+import { materialOps, type MaterialOps } from './material-ops.js';
+import { exportOps, type ExportOps } from './export-ops.js';
+import { aiOps, type AiOps } from './ai-ops.js';
+import { nextInterp, type KeyInterp } from '../editor/animation.js';
 
 export type SaveState = 'saved' | 'saving' | 'local' | 'offline' | 'error';
+
+export interface PeerSelection {
+  ids: string[];
+  name: string;
+  color: string;
+}
+
+export interface PeerCursor {
+  /** Normalised device coordinates (-1..1). */
+  x: number;
+  y: number;
+  name: string;
+  color: string;
+  at: number;
+}
 
 export interface SessionNotice {
   kind: 'info' | 'warn' | 'error';
   msg: string;
 }
 
+/**
+ * Editing commands live in focused modules (selection, transform, scene,
+ * animation, export) and are mixed into the prototype here, so the session
+ * stays the single public surface for UI, scripts and the Agent API.
+ */
+export interface EditorSession extends SelectionOps, TransformOps, SceneOps, AnimationOps, MaterialOps, ExportOps, AiOps {}
+
 export class EditorSession implements ScriptHost {
   doc: ProjectDoc;
   viewport: Viewport;
+  rig: TransformRig;
+  /** Back-compat alias: the low-level gizmo wrapper (now owned by `rig`). */
   gizmo: TransformGizmo;
   history = new History();
   playback: Playback;
@@ -41,8 +76,16 @@ export class EditorSession implements ScriptHost {
   canGenerate = true;
 
   // UI state slices (§44)
-  selection = new Store<string | null>(null);
+  /** Multi-selection. `get()` still returns the primary (single) id. */
+  selection = new SelectionStore();
   transformMode = new Store<TransformMode>('translate');
+  /** Transform coordinate space for the gizmo. */
+  gizmoSpace = new Store<GizmoSpace>('world');
+  /** Multi-select pivot: object origins, median of centres, or bounds centre. */
+  pivotMode = new Store<PivotMode>('origin');
+  /** `object` moves geometry, `pivot` moves the transform origin. */
+  transformTarget = new Store<'object' | 'pivot'>('object');
+  snapSettings = new Store<SnapSettings>(defaultSnap());
   shadingMode = new Store<ShadingMode>('material');
   cameraType = new Store<CameraType>('perspective');
   saveState = new Store<SaveState>('local');
@@ -50,14 +93,23 @@ export class EditorSession implements ScriptHost {
   online = new Store<boolean>(navigator.onLine);
   peers = new Store<PresenceUser[]>([]);
   locks = new Store<Map<string, PresenceUser>>(new Map());
+  /** What each peer has selected (collaboration 2.0 selection indicators). */
+  peerSelections = new Store<Map<string, PeerSelection>>(new Map());
+  /** Live peer pointers in normalised device coordinates. */
+  peerCursors = new Store<Map<string, PeerCursor>>(new Map());
   anim = new Store<{ playing: boolean; frame: number; length: number; fps: number }>({
     playing: false, frame: 0, length: 90, fps: 30,
   });
-  snap = new Store<boolean>(false); // gizmo translation/rotation/scale snapping
+  snap = new Store<boolean>(false); // gizmo translation/rotation/scale snapping (mirror of snapSettings.enabled)
   loop = new Store<boolean>(true); // playback loops the active clip
   rev = new Store<number>(0); // bumped on every doc mutation -> UI refresh
   canEdit = new Store<boolean>(true);
+  /** Edits received from collaborators since our last undo checkpoint. */
+  peerEdits = new Store<number>(0);
   autoKey = new Store<boolean>(false); // ⏺ record: transform edits write keyframes
+  gridVisible = new Store<boolean>(true);
+  firstPerson = new Store<boolean>(false);
+  playMode = new Store<boolean>(false);
 
   onNotice: ((n: SessionNotice) => void) | null = null;
   onRecovery: ((local: ProjectDoc, cloud: ProjectDoc) => void) | null = null;
@@ -76,11 +128,16 @@ export class EditorSession implements ScriptHost {
     // Sync engine first: store subscriptions below fire synchronously on
     // subscribe and already touch `this.sync` (presence/locks).
     this.sync = new SyncEngine(this);
+    this.rig = new TransformRig(this);
     const u = auth.user.get();
     if (u) {
       this.userId = u.id;
       this.userName = u.name;
     }
+    // Undo entries are attributed to the local user, and a fresh checkpoint
+    // means "nothing from a peer is at risk any more".
+    this.history.setAuthor(() => ({ id: this.userId, name: this.userName }));
+    this.history.onCheckpoint = () => this.peerEdits.set(0);
 
     normalizeDoc(doc);
     viewport.syncMaterials(doc.materials);
@@ -89,32 +146,7 @@ export class EditorSession implements ScriptHost {
     viewport.fixParenting(doc.objects);
     this.applySettings();
 
-    this.gizmo = new TransformGizmo(viewport.scene, viewport.camera, viewport.renderer.domElement);
-    this.gizmo.onDraggingChanged = (dragging) => {
-      viewport.controls.enabled = !dragging;
-      if (dragging) {
-        this.history.checkpoint(this.doc, 'Transform');
-        this.broadcastLock(true);
-      } else {
-        this.markDirty('transform');
-        this.autokeyFromGizmo();
-      }
-    };
-    this.gizmo.onObjectChange = (delta) => {
-      const id = this.selection.get();
-      if (!id) return;
-      const o = this.doc.objects.find((x) => x.id === id);
-      if (!o || !this.canEditObject(id)) return;
-      o.position = delta.position;
-      o.rotation = delta.rotation;
-      o.scale = delta.scale;
-      o.version++;
-      o.updatedAt = nowIso();
-      this.rev.set(this.rev.get() + 1);
-      this.scheduleLocal();
-      this.scheduleCloud();
-      this.broadcastTransform(o);
-    };
+    this.gizmo = this.rig.gizmo;
 
     this.playback = new Playback(
       () => activeClip(this.doc),
@@ -135,10 +167,9 @@ export class EditorSession implements ScriptHost {
     }
 
     this.selection.subscribe((id) => {
-      viewport.outline(id);
-      const obj = id ? viewport.objects.get(id) ?? null : null;
+      viewport.outlineSet([...this.selection.all()]);
       const editable = id ? this.canEditObject(id) : false;
-      this.gizmo.attach(obj && editable ? obj : null);
+      this.rig.sync();
       const target = id ? this.doc.objects.find((o) => o.id === id) : undefined;
       this.sync.presenceEditing(id, target?.name ?? null);
       if (id && !editable) {
@@ -147,8 +178,35 @@ export class EditorSession implements ScriptHost {
       }
       if (id) this.broadcastLock(true);
     });
+    this.selection.subscribeIds(() => {
+      viewport.outlineSet([...this.selection.all()]);
+      this.rig.sync();
+      this.sync.broadcastSelection([...this.selection.all()]);
+    });
     this.transformMode.subscribe((m) => this.gizmo.setMode(m));
-    this.snap.subscribe((on) => this.gizmo.setSnap(on));
+    this.gizmoSpace.subscribe((sp) => this.rig.setSpace(sp));
+    this.pivotMode.subscribe((m) => this.rig.setPivotMode(m));
+    this.transformTarget.subscribe((t) => this.rig.setPivotEditing(t === 'pivot'));
+    this.snapSettings.subscribe((cfg) => {
+      this.gizmo.setSnap(cfg);
+      this.snap.set(cfg.enabled);
+      viewport.setGridSize(cfg.enabled ? cfg.grid : 1);
+    });
+    this.snap.subscribe((on) => {
+      const cfg = this.snapSettings.get();
+      if (cfg.enabled !== on) this.snapSettings.set({ ...cfg, enabled: on });
+    });
+    void localDb.getSetting('gizmo.space').then((v) => { if (v === 'local') this.gizmoSpace.set('local'); });
+    void localDb.getSetting('gizmo.pivot').then((v) => { if (v === 'median' || v === 'bounds') this.pivotMode.set(v); });
+    void localDb.getSetting('gizmo.snapcfg').then((raw) => {
+      if (!raw) return;
+      try {
+        const cfg = JSON.parse(raw) as Partial<SnapSettings>;
+        this.snapSettings.set({ ...this.snapSettings.get(), ...cfg });
+      } catch { /* ignore malformed persisted snapping */ }
+    });
+    // keep the gizmo frame glued to the objects when data changes underneath it
+    this.rev.subscribe(() => { if (!this.rig.gizmo.isDragging) this.rig.sync(); });
     this.loop.subscribe((on) => { this.playback.loop = on; });
     void localDb.getSetting('gizmo.snap').then((v) => { if (v === '1') this.snap.set(true); });
     this.shadingMode.subscribe((m) => viewport.setShading(m, this.doc.settings?.envIntensity ?? 1));
@@ -156,6 +214,10 @@ export class EditorSession implements ScriptHost {
       viewport.setCameraType(t);
       this.gizmo.setCamera(viewport.camera);
     });
+    this.playback.onPlayingChange = (playing) => {
+      if (playing) this.rig.gizmo.attach(null);
+      else this.rig.sync();
+    };
     this.history.onChange = () => this.rev.set(this.rev.get() + 1);
 
     window.addEventListener('online', this.handleOnline);
@@ -287,11 +349,166 @@ export class EditorSession implements ScriptHost {
     this.notice('warn', 'Connection lost — changes are saved locally');
   };
 
+  // ---------- activity feed ----------
+  /** Append to the project activity feed (persisted, capped, broadcast). */
+  logActivity(kind: ActivityEntry['kind'], message: string, broadcast = true): void {
+    const entry: ActivityEntry = { id: uid(), at: nowIso(), actor: this.userName, kind, message };
+    this.doc.activity = [entry, ...this.doc.activity].slice(0, 80);
+    this.markDirty('activity');
+    if (broadcast) this.sync.broadcastActivity(entry);
+  }
+
+  /** Add an entry that arrived from a peer (never re-broadcast). */
+  pushActivity(entry: ActivityEntry, _broadcast = false): void {
+    if (!entry || typeof entry.message !== 'string') return;
+    const safe: ActivityEntry = {
+      id: typeof entry.id === 'string' ? entry.id : uid(),
+      at: typeof entry.at === 'string' ? entry.at : nowIso(),
+      actor: typeof entry.actor === 'string' ? entry.actor : 'Peer',
+      kind: entry.kind ?? 'system',
+      message: String(entry.message).slice(0, 240),
+    };
+    this.doc.activity = [safe, ...this.doc.activity].slice(0, 80);
+    this.rev.set(this.rev.get() + 1);
+  }
+
   // ---------- selection ----------
   select(id: string | null): void {
     const prev = this.selection.get();
-    if (prev && prev !== id) this.sync.broadcastLock(prev, null, false);
-    this.selection.set(id);
+    for (const released of this.selection.ids()) {
+      if (released !== id) this.sync.broadcastLock(released, null, false);
+    }
+    this.selection.only(id);
+    void prev;
+  }
+
+  /** Replace the selection with a set of ids (first-class multi-select). */
+  selectIds(ids: string[], primary?: string | null): void {
+    const keep = new Set(ids);
+    for (const released of this.selection.ids()) {
+      if (!keep.has(released)) this.sync.broadcastLock(released, null, false);
+    }
+    this.selection.setIds(ids, primary ?? null);
+  }
+
+  /** Shift/Ctrl-click: add or remove one object without clearing the rest. */
+  toggleSelect(id: string): void {
+    if (!id) return;
+    if (this.selection.has(id)) {
+      this.sync.broadcastLock(id, null, false);
+      this.selection.remove(id);
+    } else {
+      this.selection.add(id);
+      this.broadcastLock(true);
+    }
+  }
+
+  selectedIds(): string[] {
+    return this.selection.ids();
+  }
+
+  /** All selected object data rows (missing ids are ignored). */
+  selectedObjects(): SceneObjectData[] {
+    const ids = new Set(this.selection.ids());
+    if (!ids.size) return [];
+    return this.doc.objects.filter((o) => ids.has(o.id));
+  }
+
+  // ---------- transform plumbing (used by TransformRig) ----------
+  /** Write a decomposed local transform straight to data + viewport. */
+  writeLocalTransform(id: string, local: { position: Vec3; rotation: Vec3; scale: Vec3 }): void {
+    const o = this.doc.objects.find((x) => x.id === id);
+    if (!o || !this.canEditObject(id)) return;
+    o.position = { ...local.position };
+    o.rotation = { ...local.rotation };
+    o.scale = { ...local.scale };
+    o.version++;
+    o.updatedAt = nowIso();
+    const obj = this.viewport.objects.get(id);
+    if (obj) {
+      obj.position.set(o.position.x, o.position.y, o.position.z);
+      obj.rotation.set(o.rotation.x, o.rotation.y, o.rotation.z);
+      obj.scale.set(o.scale.x, o.scale.y, o.scale.z);
+    }
+    this.rev.set(this.rev.get() + 1);
+    this.scheduleLocal();
+    this.scheduleCloud();
+    this.broadcastTransform(o);
+  }
+
+  /** Called when a gizmo drag starts — lock the objects being edited. */
+  beginTransformBroadcast(): void {
+    this.broadcastLock(true);
+  }
+
+  /** Called when a gizmo drag ends — release locks and persist. */
+  endTransformBroadcast(): void {
+    for (const id of this.selection.ids()) this.sync.broadcastLock(id, null, false);
+  }
+
+  /**
+   * Snap-to-objects: after a translate drag, drop the selection onto whatever
+   * surface sits under the cursor (ignoring the selection itself).
+   */
+  dropToSurface(): void {
+    const cfg = this.snapSettings.get();
+    if (!cfg.enabled || !cfg.toObjects) return;
+    if (this.transformMode.get() !== 'translate') return;
+    const hit = this.viewport.raycastPointer([...this.selection.all()]);
+    if (!hit) return;
+    const origin = this.rig.frameOrigin();
+    const delta = hit.point.clone().sub(origin);
+    if (delta.lengthSq() < 1e-8) return;
+    this.translateWorld(delta, [...this.selection.all()]);
+  }
+
+  /** Move objects by a world-space offset, keeping parented locals correct. */
+  translateWorld(delta: THREE.Vector3, ids = this.selection.ids()): void {
+    if (!ids.length) return;
+    const byId = new Map(this.doc.objects.map((o) => [o.id, o]));
+    const set = new Set(ids);
+    const roots = ids.filter((id) => {
+      let p = byId.get(id)?.parentId ?? null;
+      let hops = 0;
+      while (p && hops++ < 64) {
+        if (set.has(p)) return false;
+        p = byId.get(p)?.parentId ?? null;
+      }
+      return true;
+    });
+    for (const id of roots) {
+      const obj = this.viewport.objects.get(id);
+      const data = byId.get(id);
+      if (!obj || !data || !this.canEditObject(id)) continue;
+      obj.updateWorldMatrix(true, false);
+      const world = obj.matrixWorld.clone();
+      const parentInv = obj.parent ? obj.parent.matrixWorld.clone().invert() : new THREE.Matrix4();
+      const moved = new THREE.Matrix4().multiplyMatrices(
+        parentInv,
+        new THREE.Matrix4().multiplyMatrices(new THREE.Matrix4().makeTranslation(delta.x, delta.y, delta.z), world),
+      );
+      const pos = new THREE.Vector3();
+      const quat = new THREE.Quaternion();
+      const scl = new THREE.Vector3();
+      moved.decompose(pos, quat, scl);
+      const euler = new THREE.Euler().setFromQuaternion(quat, 'XYZ');
+      this.writeLocalTransform(id, {
+        position: { x: pos.x, y: pos.y, z: pos.z },
+        rotation: { x: euler.x, y: euler.y, z: euler.z },
+        scale: { x: scl.x, y: scl.y, z: scl.z },
+      });
+    }
+  }
+
+  /** Set the transform origin (pivot) of an object, in its own local space. */
+  setPivot(id: string, pivot: Vec3): void {
+    const o = this.doc.objects.find((x) => x.id === id);
+    if (!o) return;
+    o.pivot = { ...pivot };
+    o.updatedAt = nowIso();
+    o.version++;
+    this.markDirty('pivot');
+    this.sync.broadcastOp('update', o);
   }
 
   selectedId(): string | null {
@@ -544,7 +761,9 @@ export class EditorSession implements ScriptHost {
     }
     if (scl) o.scale = { ...o.scale, ...scl };
     o.version++;
+    o.updatedAt = nowIso();
     this.viewport.updateObject(o);
+    this.rig.sync();
     if (this.autoKey.get()) {
       if (pos) this.keyProp(o, 'position');
       if (rotDeg) this.keyProp(o, 'rotation');
@@ -560,12 +779,14 @@ export class EditorSession implements ScriptHost {
     setKeyframe(this.doc, o.id, prop, this.playback.frame, trackValueOf(o, prop));
   }
 
-  private autokeyFromGizmo(): void {
+  /** Auto-key: write a keyframe for whatever the gizmo just changed. */
+  autokeyFromGizmo(): void {
     if (!this.autoKey.get()) return;
-    const o = this.selectedObject();
-    if (!o) return;
     const map = { translate: 'position', rotate: 'rotation', scale: 'scale' } as const;
-    this.keyProp(o, map[this.transformMode.get()]);
+    const prop = map[this.transformMode.get()];
+    const targets = this.selectedObjects();
+    if (!targets.length) return;
+    for (const o of targets) this.keyProp(o, prop);
     this.markDirty('animation');
   }
 
@@ -574,13 +795,14 @@ export class EditorSession implements ScriptHost {
     const local = this.doc.objects.find((x) => x.id === o.id);
     if (!local || o.version < local.version) return;
     // don't fight an active local drag
-    if (this.selection.get() === o.id && this.gizmo.controls.dragging) return;
+    if (this.selection.has(o.id) && this.rig.gizmo.isDragging) return;
     local.position = o.position;
     local.rotation = o.rotation;
     local.scale = o.scale;
     local.version = o.version;
     this.viewport.updateObject(local);
     this.rev.set(this.rev.get() + 1);
+    this.peerEdits.set(this.peerEdits.get() + 1);
     this.scheduleLocal();
   }
 
@@ -607,6 +829,7 @@ export class EditorSession implements ScriptHost {
       }
     }
     this.rev.set(this.rev.get() + 1);
+    this.peerEdits.set(this.peerEdits.get() + 1);
     this.scheduleLocal();
   }
 
@@ -619,6 +842,7 @@ export class EditorSession implements ScriptHost {
     this.viewport.syncMaterials(this.doc.materials);
     for (const o of this.doc.objects) this.viewport.updateObject(o);
     this.rev.set(this.rev.get() + 1);
+    this.peerEdits.set(this.peerEdits.get() + 1);
     this.scheduleLocal();
   }
 
@@ -692,9 +916,10 @@ export class EditorSession implements ScriptHost {
   }
 
   // ---------- GLB assets ----------
-  async importGlbFile(file: File): Promise<void> {
+  /** Import a model file; resolves to the created object (null on failure). */
+  async importGlbFile(file: File): Promise<SceneObjectData | null> {
     const buf = await file.arrayBuffer();
-    await this.importGlbBytes(file.name.replace(/\.(glb|gltf)$/i, '') || 'Model', buf, file.name);
+    return this.importGlbBytes(file.name.replace(/\.(glb|gltf)$/i, '') || 'Model', buf, file.name);
   }
 
   async importGlbBytes(name: string, buf: ArrayBuffer, filename?: string): Promise<SceneObjectData | null> {
@@ -741,7 +966,7 @@ export class EditorSession implements ScriptHost {
     }
   }
 
-  private async attachAsset(o: SceneObjectData): Promise<void> {
+  async attachAsset(o: SceneObjectData): Promise<void> {
     if (!o.assetId) return;
     let buf = this.blobs.get(o.assetId);
     if (!buf) {
@@ -768,9 +993,15 @@ export class EditorSession implements ScriptHost {
   }
 
   // ---------- textures (base-color maps) ----------
-  async uploadTexture(materialId: string, file: File): Promise<void> {
+  /**
+   * Upload an image and assign it to a material slot.
+   * `slot` picks which map is written: base colour, normal or ambient
+   * occlusion (normal maps are NOT colour-space converted).
+   */
+  async uploadTexture(materialId: string, file: File, slot: 'base' | 'normal' | 'ao' = 'base'): Promise<void> {
     const m = this.doc.materials.find((x) => x.id === materialId);
     if (!m) return;
+    const slotField = slot === 'base' ? 'mapAssetId' : slot === 'normal' ? 'normalMapAssetId' : 'aoMapAssetId';
     const buf = await file.arrayBuffer();
     const blob = new Blob([buf], { type: file.type || 'image/png' });
     let bitmap: ImageBitmap;
@@ -781,20 +1012,23 @@ export class EditorSession implements ScriptHost {
       return;
     }
     this.history.checkpoint(this.doc, 'Add texture');
-    // drop previous map
-    if (m.mapAssetId) this.dropTexture(m.mapAssetId, materialId);
+    // drop the previous map for this slot
+    const previous = m[slotField] as string | null;
+    if (previous) this.dropTexture(previous, materialId);
     const assetId = uid();
     await localDb.saveBlob(assetId, blob);
     const tex = this.textureFromBitmap(bitmap);
+    if (slot === 'normal') tex.colorSpace = THREE.NoColorSpace;
     this.textures.set(assetId, tex);
     this.doc.assets.push({
       id: assetId, name: file.name, kind: 'texture', mime: blob.type,
       size: buf.byteLength, storagePath: null, local: true,
       thumb: makeThumb(bitmap), createdAt: nowIso(),
     });
-    m.mapAssetId = assetId;
+    (m[slotField] as string | null) = assetId;
     m.updatedAt = nowIso();
-    this.viewport.materials.setMap(materialId, tex, m);
+    if (slot === 'base') this.viewport.materials.setMap(materialId, tex, m);
+    else this.viewport.materials.setSlotMap(materialId, slot, tex);
     for (const o of this.doc.objects) if (o.materialId === materialId) this.viewport.updateObject(o);
     this.markDirty('material');
     this.sync.broadcastMaterial(m);
@@ -1046,12 +1280,12 @@ export class EditorSession implements ScriptHost {
       return;
     }
     this.history.checkpoint(this.doc, 'Toggle interpolation', 800);
-    let mode: 'linear' | 'step' | null = null;
+    let mode: KeyInterp | null = null;
     for (const t of clip.tracks) {
       if (t.objectId !== o.id) continue;
       for (const k of t.keyframes) {
         if (k.frame !== this.playback.frame) continue;
-        k.interp = k.interp === 'linear' ? 'step' : 'linear';
+        k.interp = nextInterp(k.interp);
         mode = k.interp;
       }
     }
@@ -1063,7 +1297,7 @@ export class EditorSession implements ScriptHost {
     this.notice('info', `Interpolation: ${mode}`);
   }
 
-  interpAtPlayhead(): 'linear' | 'step' | null {
+  interpAtPlayhead(): KeyInterp | null {
     const o = this.selectedObject();
     const clip = activeClip(this.doc);
     if (!o || !clip) return null;
@@ -1233,7 +1467,7 @@ export class EditorSession implements ScriptHost {
     return { objectIds, provider: 'procedural-mesh' };
   }
 
-  private applyPose(frame: number): void {
+  applyPose(frame: number): void {
     const clip = activeClip(this.doc);
     if (!clip) return;
     const pose = samplePose(clip, frame);
@@ -1252,15 +1486,107 @@ export class EditorSession implements ScriptHost {
     }
   }
 
-  // ---------- undo/redo ----------
-  undo(): void {
+  // ---------- undo/redo (collaboration aware) ----------
+
+  /**
+   * Undo is snapshot based, so reverting our own change also rolls back any
+   * edit a collaborator made after it. Rather than silently throwing their work
+   * away, the first request explains what is at stake and asks to confirm;
+   * solo editing (no peer edits pending) is never interrupted.
+   */
+  private undoArmed = false;
+  private undoTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** What `undo()` would revert, with its author. */
+  undoPreview(): { label: string; author: string | null; peerEdits: number } | null {
+    const entry = this.history.undoInfo();
+    if (!entry) return null;
+    return { label: entry.label, author: entry.author?.name ?? null, peerEdits: this.peerEdits.get() };
+  }
+
+  /** Recent undo entries (newest first) for the activity / history panel. */
+  recentChanges(limit = 12): { label: string; author: string | null; at: number }[] {
+    return this.history.entries(limit).map((e) => ({ label: e.label, author: e.author?.name ?? null, at: e.at }));
+  }
+
+  /** Cancel a pending "press again to confirm" undo. */
+  private disarmUndo(): void {
+    this.undoArmed = false;
+    if (this.undoTimer) clearTimeout(this.undoTimer);
+    this.undoTimer = null;
+  }
+
+  undo(force = false): void {
+    if (!this.history.canUndo()) {
+      this.notice('info', 'Nothing to undo');
+      return;
+    }
+    const peers = this.peerEdits.get();
+    if (!force && peers > 0 && !this.undoArmed) {
+      this.undoArmed = true;
+      this.undoTimer = setTimeout(() => this.disarmUndo(), 8000);
+      this.notice('warn', `Undoing also reverts ${peers} change${peers === 1 ? '' : 's'} from collaborators — press undo again to confirm`);
+      return;
+    }
+    this.disarmUndo();
+    const entry = this.history.undoInfo();
     if (!this.history.undo(this.doc)) return;
+    this.peerEdits.set(0);
+    this.scriptEngine.invalidate();
+    this.rebuildFromDoc();
+    this.markDirty('undo');
+    if (entry) this.notice('info', `Undid ${this.history.describe(entry)}`);
+  }
+
+  redo(): void {
+    if (!this.history.canRedo()) {
+      this.notice('info', 'Nothing to redo');
+      return;
+    }
+    if (!this.history.redo(this.doc)) return;
     this.scriptEngine.invalidate();
     this.rebuildFromDoc();
     this.markDirty('undo');
   }
-  redo(): void {
-    if (!this.history.redo(this.doc)) return;
+
+  /**
+   * Undo only my own work: walks back to my newest entry and reverts it (plus
+   * everything above it) as a single step, so one Ctrl+Z never eats a
+   * collaborator's edit by accident without saying so.
+   */
+  undoMine(force = false): void {
+    const depth = this.history.depthOfMine(this.userId);
+    if (depth === null) {
+      this.undo(force);
+      return;
+    }
+    if (!force && (depth > 0 || this.peerEdits.get() > 0) && !this.undoArmed) {
+      this.undoArmed = true;
+      this.undoTimer = setTimeout(() => this.disarmUndo(), 8000);
+      const reason = depth > 0
+        ? `your last change is ${depth} step${depth === 1 ? '' : 's'} back`
+        : `${this.peerEdits.get()} collaborator change${this.peerEdits.get() === 1 ? '' : 's'} came after it`;
+      this.notice('warn', `Undoing your change also reverts what came after (${reason}) — press again to confirm`);
+      return;
+    }
+    this.disarmUndo();
+    const entry = this.history.undoInfo();
+    if (!this.history.undoThrough(this.doc, depth)) return;
+    this.peerEdits.set(0);
+    this.scriptEngine.invalidate();
+    this.rebuildFromDoc();
+    this.markDirty('undo');
+    if (entry) this.notice('info', `Undid ${this.history.describe(entry)}`);
+  }
+
+  /** Redo counterpart of `undoMine()`. */
+  redoMine(): void {
+    const depth = this.history.depthOfMine(this.userId);
+    if (depth === null || depth === 0) {
+      this.redo();
+      return;
+    }
+    if (!this.history.redoThrough(this.doc, depth)) return;
     this.scriptEngine.invalidate();
     this.rebuildFromDoc();
     this.markDirty('undo');
@@ -1319,15 +1645,22 @@ export class EditorSession implements ScriptHost {
     return { id: this.userId, name: this.userName };
   }
 
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   dispose(): void {
     this.disposed = true;
     window.removeEventListener('online', this.handleOnline);
     window.removeEventListener('offline', this.handleOffline);
     void this.localSave();
     this.sync.dispose();
-    this.gizmo.dispose();
+    this.rig.dispose();
     for (const tex of this.textures.values()) tex.dispose();
     this.textures.clear();
     this.viewport.dispose();
   }
 }
+
+// Mix the focused command modules into the session prototype.
+Object.assign(EditorSession.prototype, selectionOps, transformOps, sceneOps, animationOps, materialOps, exportOps, aiOps);

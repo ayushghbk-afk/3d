@@ -75,6 +75,12 @@ export function mountDashboard(root: HTMLElement): () => void {
           <div class="starter-grid">
             ${starterCard('product', 'Create a product mockup', 'A lit stage with a stylized product object so you can focus on positioning and materials.', 'Launch mockup')}
             ${starterCard('lowpoly', 'Make a low-poly scene', 'A tiny scene with ground, cabin, tree, and lighting to remix into your own world.', 'Open scene')}
+            ${starterCard('room', 'Build a room', 'Floor, walls, furniture and practical lights — a ready interior to restyle.', 'Open room')}
+            ${starterCard('game', 'Game environment', 'Platforms, ramps and collectibles with physics bodies for Play Mode.', 'Open level')}
+            ${starterCard('character', 'Character base', 'A simple figure you can pose, restyle and animate.', 'Open character')}
+            ${starterCard('solar', 'Solar system', 'Sun, planets and orbits with a looping animation clip.', 'Open system')}
+            ${starterCard('animation', 'Animation demo', 'A bouncing ball with keyframes — see the timeline and dope sheet work.', 'Open animation')}
+            ${starterCard('logo', '3D logo', 'Backdrop, extruded mark and neon accent for a logo render.', 'Open logo')}
             ${starterCard('blank', 'Generate with AI', 'Start with a clean scene and open AI Studio immediately with prompt examples ready.', 'Open AI Studio', true)}
           </div>
         </section>
@@ -296,9 +302,7 @@ function newProjectModal(onDone: () => void): void {
     <div class="field">
       <span class="field-label">Starter scene</span>
       <div class="starter-grid starter-grid-modal">
-        ${starterChoice('blank', 'Blank canvas', 'Start from an empty scene and add objects yourself.')}
-        ${starterChoice('product', 'Product mockup', 'A staged object and lighting so styling and camera work feel immediate.')}
-        ${starterChoice('lowpoly', 'Low-poly scene', 'A tiny world to remix instead of staring at an empty viewport.')}
+        ${STARTER_TEMPLATES.map((t) => starterChoice(t.id, t.title, t.desc)).join('')}
       </div>
     </div>`;
   body.querySelectorAll<HTMLElement>('[data-starter-choice]').forEach((card) => {
@@ -374,6 +378,19 @@ function joinModal(): void {
     ],
   });
 }
+
+/** Every starting point offered by the New Project screen. */
+export const STARTER_TEMPLATES: { id: StarterTemplate; title: string; desc: string }[] = [
+  { id: 'blank', title: 'Blank scene', desc: 'Empty scene — add objects yourself.' },
+  { id: 'product', title: 'Product showcase', desc: 'Staged object and lighting for styling and camera work.' },
+  { id: 'lowpoly', title: 'Low-poly world', desc: 'A tiny world to remix instead of an empty viewport.' },
+  { id: 'room', title: 'Room interior', desc: 'Floor, walls, ceiling, furniture and practical lights.' },
+  { id: 'game', title: 'Game environment', desc: 'Platforms, ramps, coins and physics bodies — ready for Play Mode.' },
+  { id: 'character', title: 'Character', desc: 'Simple rigged-looking figure you can pose and animate.' },
+  { id: 'solar', title: 'Solar system', desc: 'Sun, planets and orbit rings with a looping animation clip.' },
+  { id: 'animation', title: 'Animation', desc: 'Bouncing ball with keyframes — a tour of the timeline.' },
+  { id: 'logo', title: '3D logo', desc: 'Backdrop, extruded mark and neon accent for a logo render.' },
+];
 
 function starterCard(template: StarterTemplate, title: string, desc: string, cta: string, openAi = false): string {
   return `
