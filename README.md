@@ -3,6 +3,118 @@
 Lightweight browser-based 3D modeling, animation and real-time collaboration.
 Mobile-first, local-first, cloud-synced.
 
+## Features
+
+Everything below runs in the browser — no install, no backend to host. The app
+stays deliberately small: vanilla TypeScript, one CSS file, three.js, and heavy
+panels (AI Studio, Scripts, scene dialogs) loaded only when you open them.
+
+### Edit
+
+- **Transform gizmos** — move / rotate / scale (`W` `E` `R`) in world or local
+  space (`X`), with grid snapping, rotation snapping and object snapping.
+- **Multi-select** — Shift/Ctrl-click, box select (`Ctrl+drag`), select all,
+  invert, cycle (`Tab`), select children/parent/siblings/same material. The
+  inspector edits every selected object at once and the gizmo drives them
+  together.
+- **Real selection hygiene** — hide/show (`H`), solo (`/`), lock/unlock, inline
+  rename, collections, drag-to-reparent in the outliner, and search that filters
+  the tree as you type.
+- **Apply / reset transforms**, **duplicate**, **mirror on X/Y/Z**,
+  **drop to ground**, **align**, **snap to grid**, **pivot & origin editing**
+  (bounds centre / bottom / top / object origin).
+- **Command palette** (`Ctrl/⌘+K`) — every action, fuzzy-searchable, with
+  recent commands remembered. `Shift+A` opens it straight on the create menu.
+- **Outliner v2** — hierarchy, visibility, locks, drag-parenting, multi-select,
+  search, collections.
+- **Undo/redo that respects collaborators** — every entry is tagged with its
+  author; if someone edited after you, undo tells you what else would be
+  reverted and asks before throwing their work away. The collaboration panel
+  lists recent changes with authors.
+- **Autosave** every 20s plus crash recovery: a heartbeat lets the app offer
+  your unsaved session back after a reload.
+
+### Create
+
+- **Primitives** (cube, sphere, cylinder, cone, plane, torus) and **lights**
+  (point, spot, directional, ambient, hemisphere).
+- **Material editor** — base colour, metallic, roughness, emission, opacity,
+  transmission, side, plus base / normal / AO texture slots and one-click
+  **presets**: plastic, metal, glass, wood, stone, fabric, neon, gold, chrome,
+  rubber, emerald, matte.
+- **Asset library** — models, materials, textures, HDRI environments and recent
+  items; drag a tile into the viewport to drop it where you point.
+- **Lighting & environment** — PMREM environment presets (room, studio, sunset,
+  night, overcast, cyberpunk, forest, void), fog, and post-FX (bloom, vignette,
+  grain, depth of field).
+- **Procedural textures** — eight canvas-generated patterns (checker, grid,
+  noise, wood, marble, bricks, camo, gradient) with no asset download.
+- **Cameras** — perspective/orthographic (`Alt+5`), top/front/right/left/back/
+  bottom presets (`Alt+7/1/3`), frame selected (`F`), focus, bookmarks,
+  first-person walk mode.
+- **Mesh tools** — merge, subdivide, decimate, mirror, plus GLB import with
+  drag-and-drop placement.
+
+### Animate
+
+- **Timeline** with scrubbing, play/pause, loop, FPS selector and clip length.
+- **Dope sheet** — one row per animated object/property, key diamonds you can
+  drag, marquee select, copy/paste/delete keys, easing presets per key
+  (linear, step, ease, ease-in, ease-out), and a **graph mode** for curves.
+- **Auto-key** recording, previous/next keyframe jumps (`,` `.`), **bake to a
+  new clip**, multiple clips, and animated **GLB export**.
+
+### Collaborate
+
+- Live **cursors**, **presence list** and "Ayush is editing *Cube*" selection
+  indicators, with a **Focus** button to jump to what a teammate selected.
+- **Object locks**, **activity feed**, **version history with restore**, and
+  share roles (view / comment / edit / public link).
+- Sync indicator, offline queue and conflict detection; everything keeps
+  working with no network and reconciles when you come back.
+
+### AI
+
+- **Build a scene from text** — "create a small sci-fi room with a desk, two
+  monitors, blue neon lights and a chair" produces a whole named hierarchy with
+  materials, lights, environment and post-FX. Works offline (deterministic
+  composer) and improves with an LLM when one is configured.
+- **Restyle the scene** — "make this look like a cyberpunk game" remaps
+  materials, lighting, environment, fog and post-FX across 12 styles.
+- **Optimize**, **AI textures**, **text-to-3D**, **Ask** (project-grounded Q&A)
+  and the **Agent API** — see [`docs/AGENT_API.md`](docs/AGENT_API.md).
+
+### Play & ship
+
+- **▶ Play Mode** (`P`) — first-person WASD + mouse look, touch joystick + jump
+  button, gravity, colliders, trigger volumes, and `play`/`frame` scripts.
+  Exiting restores your authored scene exactly.
+- **Export a playable web game** — one self-contained HTML file with the scene
+  embedded, ▶ Play, WASD/touch controls, physics, triggers and your `play`
+  scripts. Host it anywhere.
+- Also **GLB**, **OBJ**, **PNG** render, **.3dproject backup**, and
+  **GitHub** import/export.
+
+### Save everywhere
+
+Three layers, always: **IndexedDB on the device**, **Supabase in the cloud**
+(when signed in), and **.3dproject file export/import**. Autosave, offline
+queue with reconnect flush, sync indicator, conflict detection, version history
+with restore and backup download/import.
+
+### Mobile
+
+On phones and tablets the editor becomes a bottom-sheet workflow — Add /
+Object / AI / More sheets, a transform bar and a transport row — so the 3D view
+keeps most of the screen. Touch gestures: one finger orbits, two fingers pan,
+pinch zooms, long-press selects, double-tap focuses.
+
+### Templates
+
+New projects start from Blank, Product Showcase, Low-Poly World, Room, Game
+Environment, Character, Solar System, Animation or 3D Logo.
+
+
 ## GitHub Pages + Supabase
 
 **Site:** https://ayushghbk-afk.github.io/3d/

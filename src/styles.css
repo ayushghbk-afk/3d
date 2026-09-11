@@ -607,3 +607,8 @@ body.play-mode .dock-strip { display: none !important; }
 .history-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-btn.warn { color: #fbbf24; border-color: rgba(251, 191, 36, 0.4); }
 .rail-btn[disabled] { opacity: 0.45; cursor: default; }
+
+/* shortcut sheet groups */
+.keys-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.keys-group h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; opacity: .65; }
+.keys-group .keys { width: 100%; }

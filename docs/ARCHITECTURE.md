@@ -59,22 +59,43 @@ Node material editor, texture painting, IK/weight painting, path tracing, WebRTC
 
 ```
 lib/        utils, supabase client, auth, indexeddb, database.types
-state/      store.ts, models.ts (ProjectDoc, SceneObjectData, clips…)
 engine/
   renderer.ts   WebGL2 renderer, WebGPU detection, PBR/env/shadows, resize, dispose
   viewport.ts   scene graph mirror, cameras (persp/ortho), lights, grid, picking,
-                shading modes, OrbitControls w/ touch mapping
-  transform.ts  TransformControls wrapper, snap, mobile-friendly handles
+                box select, touch gestures, environment/fog/post-FX wiring,
+                first-person mode, PNG capture, screen/ground projection
+  transform.ts  TransformControls wrapper: space, snap (grid/rotation/object),
+                pivot modes, mobile-friendly handles
   geometry.ts   primitive factory + params, imported GLB attachment, disposal
-  materials.ts  MaterialData ⇄ MeshStandardMaterial, env intensity, transparency
-  gltf.ts       GLB import (Loader) / export (Exporter), asset blob plumbing
+  materials.ts  MaterialData ⇄ MeshPhysicalMaterial, presets, slot maps
+  gltf.ts       GLB import (Loader) / export (Exporter), clip ⇄ track mapping
+  environments.ts  PMREM environment presets (room/studio/sunset/night/…)
+  postfx.ts     bloom / vignette / grain / DoF composer pass
+  modeling.ts   merge, subdivide, decimate (no CSG — booleans stay out of scope)
+  fps-controls.ts  first-person controller used by Play Mode
+  procedural-textures.ts  canvas-generated textures (no asset download)
 editor/
-  session.ts    EditorSession: owns doc, three mirror, mutate(), save scheduling
-  history.ts    snapshot-ring undo/redo (cap 60, coalesced during drags)
+  session.ts    EditorSession: owns doc + three mirror, mixin host for every op
+  history.ts    snapshot-ring undo/redo (cap 60, coalesced drags, authored
+                entries → `undoThrough` / `depthOfMine` for per-user undo)
   animation.ts  clip/track/keyframe ops + playback sampler
+  transform-rig.ts  gizmo ↔ selection binding, pivot + snapping state
+  transform-ops.ts  duplicate, mirror, apply/reset, pivot presets, align, drop
+  selection-ops.ts  multi-select, hide/solo/lock, groups, collections
+  scene-ops.ts  environments, fog, post-FX, bookmarks, mesh tools, stats
+  animation-ops.ts  keys, easing, clips, dope sheet model, bake
+  material-ops.ts   presets, map slots (base/normal/AO), texture upload
+  export-ops.ts     OBJ / PNG / GLB / .3dproject / web game
+  web-game-export.ts  pure template builder for the playable HTML export
+  ai-ops.ts      build scene from text, restyle, optimize
   serialization.ts  project.json / scene.json / assets.json / AI_PROJECT_CONTEXT.md
   sync.ts       cloud load/save, Broadcast transforms, Presence, locks,
                 offline queue flush, versions, change log
+state/
+  store.ts      Store<T> pub/sub slices
+  selection.ts  multi-selection with a single-id back-compat surface
+  models.ts     ProjectDoc, SceneObjectData, clips, materials, scripts…
+  tree.ts       subtree collection / cycle-safe parenting
 github/
   github.ts     PAT + Device-Flow auth, repo/branch/tree APIs, blob upload,
                 import detection, export commit builder
@@ -82,6 +103,8 @@ ai/
   agent-api.ts  AgentAPI: projects/objects/materials/assets/clips/scripts/
                 camera/playback/history/AI + Texture API, token auth + scopes +
                 rate limits + audit log; live EditorSession or headless IndexedDB
+  scene-planner.ts  prompt → ScenePlan (deterministic local composer + LLM JSON)
+  style.ts      12 scene styles: palette, lights, environment, fog, post-FX
   scripts.ts    sandboxed scene JS (meshes, keyframes, camera, AI generate)
   bridge.ts     transports: window.Web3DStudio.agent + .textures + postMessage + BroadcastChannel
   relay.ts      browser long-poll client for server/agent-relay.mjs (real HTTP)
@@ -96,8 +119,21 @@ ai/
   procedural.ts offline fallbacks: canvas textures + primitive 3D plans
 server/agent-relay.mjs  zero-dep localhost HTTP relay for external agents
 ui/
-  router, toast, dashboard, editor shell, outliner, inspector, toolbar,
-  timeline, modals, github-modal, chrome.ts (fullscreen + auto-hide tools)
+  router, toast, dashboard, editor shell
+  commands.ts        single action registry (palette + menus + mobile + agent)
+  command-palette.ts Ctrl/⌘+K fuzzy palette with recents
+  outliner.ts        hierarchy, search, rename, drag-parenting, collections
+  inspector.ts       transforms, PBR material editor, lights, physics, stats
+  asset-browser.ts   models/materials/textures/HDRIs/environments, drag-drop
+  dopesheet.ts       dope sheet + graph editor (keys, easing, copy/paste)
+  timeline.ts        transport, scrubbing, FPS, clip length
+  presence.ts        people, live cursors, locks, activity, recent changes
+  playmode.ts        ▶ Play: FPS controls, gravity, colliders, triggers
+  mobile.ts          bottom-sheet editing mode + touch bars
+  layout.ts          dockable panel layout persistence
+  panels-extra.ts    export hub, share roles
+  ai-scene-ui.ts     build-from-text / restyle dialogs
+  chrome.ts          fullscreen + auto-hide tools
 workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 ```
 
@@ -114,11 +150,21 @@ workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 
 ## 5. Input (§6–7)
 
-- Desktop: Orbit (LMB), pan (RMB/MMB), wheel zoom, WASD optional, shortcuts:
-  `W/E/R` gizmo, `V` select, `F` focus, `Del`, `Ctrl+D`, `Ctrl+Z/Shift+Z`, `Ctrl+S`.
-- Mobile: tap = select, 1-finger drag = orbit, 2-finger = pan+pinch, gizmo handles
-  enlarged via `transform.ts` scale factor; bottom toolbar + bottom-sheet inspector.
-- Tap-vs-drag disambiguation by pointer travel < 8px within 300ms.
+- Desktop: Orbit (LMB), pan (RMB/MMB), wheel zoom, `Ctrl+drag` box select.
+- Mobile: tap = select, long-press = select/add, 1-finger drag = orbit,
+  2-finger = pan + pinch, double-tap = focus; gizmo handles enlarged via
+  `transform.ts` scale factor; bottom-sheet panels instead of side columns.
+- Tap-vs-drag disambiguation by pointer travel < 8px within 400ms.
+- Shortcuts (also in the in-app **?** sheet and the command palette):
+  `W/E/R` gizmo · `X` space · `Alt+R` reset · `Ctrl+Shift+A` apply transforms ·
+  `Ctrl+D` duplicate · `Ctrl+G`/`Ctrl+Shift+G` group/ungroup · `Del` delete ·
+  `Ctrl+A`/`Ctrl+I` select all/invert · `Tab` cycle · `V` deselect ·
+  `H`/`Shift+H` hide/show · `/` solo · `F`/`Shift+F` frame selected/all ·
+  `G` grid · `Z` wireframe · `Alt+1/3/7` views · `Alt+5` ortho ·
+  `K` keyframe · `,`/`.` prev/next key · `Space` play · `P` play mode ·
+  `A` AI Studio · `J` Scripts · `Ctrl+K` palette · `Shift+A` add menu ·
+  `?` shortcuts · `Ctrl+Z`/`Ctrl+Shift+Z` undo/redo · `Ctrl+S` save ·
+  `F11` fullscreen · `Esc` show tools / exit.
 
 ## 6. Geometry & materials (§8–15)
 
@@ -174,27 +220,43 @@ workers/      (reserved) asset-thumbnail.worker.ts in Phase 7
 ## 12. Performance budget (§45–47)
 
 - Initial JS ≤ 350 kB gzip (three chunk lazy-loads editor only on `#/p/`).
+  Current build: `three` ≈ 135 kB gz, app shell ≈ 119 kB gz, editor ≈ 135 kB gz,
+  CSS ≈ 8 kB gz; AI Studio (10 kB gz), Scripts (2 kB gz) and the scene dialogs
+  (1.5 kB gz) are separate chunks fetched on first open.
 - First paint < 2s on Moto G-class; viewport ≥ 30fps with 200 primitives.
 - Debounced cloud writes; Broadcast ≤ 15Hz/object; progressive asset load
   (metadata → thumbnails → visible → rest).
 
 ## 13. Phase tracker
 
-- [x] Phase 1 — foundation (this drop): scaffold, viewport, auth, dashboard,
-      solo/team create, cloud save/load, offline queue, presence+locks (supabase
-      path implemented, local fallback), timeline V1, GLB import/export,
-      GitHub import/export window, PWA shell.
-- [ ] Phase 2 — hardening: outliner DnD, multi-select, measurement, shortcuts UI.
-- [ ] Phase 3 — storage pipeline: thumbnails, compression, progressive LOD rows.
-- [ ] Phase 4 — collab polish: cursors, follow mode, conflict UI, invite links.
-- [x] Animation basics+: auto-key record mode, prev/next keyframe, linear/step toggle.
-- [x] Lighting basics: point/spot/directional/ambient/hemisphere + env/shadow scene settings.
-- [x] Material/texture basics: presets, flat/double-sided, emissive intensity, image maps.
-- [ ] Phase 5 — animation: graph editor, GLB clip import, retarget basics.
-- [ ] Phase 6 — modeling: half-edge ops, bevel/loopcut/knife/mirror/subdiv.
+- [x] Phase 1 — foundation: scaffold, viewport, auth, dashboard, solo/team
+      create, cloud save/load, offline queue, presence + locks, timeline V1,
+      GLB import/export, GitHub import/export window, PWA shell.
+- [x] Phase 2 — hardening: outliner DnD + search + collections, full
+      multi-select, command palette, mobile editing mode, shortcuts sheet.
+- [x] Phase 3 — storage pipeline: thumbnails, blobs in IndexedDB, autosave +
+      crash-recovery heartbeat, `.3dproject` backup/import.
+- [x] Phase 4 — collab polish: live cursors, "X is editing Y" indicators, locks,
+      activity feed, share roles, version history + restore, authored undo with
+      peer-conflict confirmation. Remaining: follow mode, conflict merge UI.
+- [x] Animation basics+: auto-key, prev/next key, per-key easing, dope sheet with
+      draggable keys, graph mode, clips, bake, animated GLB export.
+- [x] Lighting basics: point/spot/directional/ambient/hemisphere, PMREM
+      environment presets, fog, post-FX (bloom/vignette/grain/DoF).
+- [x] Material/texture basics: PBR fields, 12 presets, base/normal/AO slots,
+      procedural textures, AI textures.
+- [~] Phase 5 — animation: graph editor (inside the dope sheet) done, GLB clip
+      import done; retarget basics still open.
+- [~] Phase 6 — modeling: merge / subdivide / decimate / mirror done.
+      Half-edge ops (extrude, inset, bevel, loop-cut, knife) and booleans stay
+      deliberately unimplemented: a real implementation needs a half-edge
+      kernel, and faking them has burned every lightweight web editor.
 - [ ] Phase 7 — workers/wasm/UV/paint/LOD/node materials.
-- [x] Phase 8 (agent/API slice) — AI Studio: Groq Llama Ask (proxy) + free Stable Fast 3D (+TripoSR fallback) + Pollinations textures,
-      custom OpenAI-compatible endpoints, Agent API (page/postMessage/channel/relay),
-      token auth + audit log, offline fallbacks. Remaining: PR export, repo templates.
-- [ ] Phase 8 — GitHub: PR export, repo templates.
+- [x] Phase 8 (agent/API slice) — AI Studio: Groq Llama Ask (proxy) + free
+      Stable Fast 3D (+TripoSR fallback) + Pollinations textures, custom
+      OpenAI-compatible endpoints, Agent API (page/postMessage/channel/relay),
+      token auth + audit log, offline fallbacks, scene-from-text + restyle.
+      Remaining: PR export, repo templates.
+- [x] Play mode slice — first-person controls, gravity, colliders, triggers,
+      `play`/`frame` scripts, playable single-file HTML export.
 - [ ] Phase 9 — perf/a11y/i18n/docs pass.
