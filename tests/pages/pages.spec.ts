@@ -163,3 +163,148 @@ test('restores an email-link session at /3d/ and persists it after refresh', asy
   await page.reload();
   await expect(page.locator('#user-chip')).toHaveText('Email Artist');
 });
+
+// ---------- invite links ----------
+const inviteProjectId = '40000000-0000-4000-8000-000000000001';
+const inviteSceneId = '41000000-0000-4000-8000-000000000001';
+const inviteeId = '00000000-0000-4000-8000-000000000009';
+
+function inviteeToken(): { token: string; user: Record<string, unknown>; expires: number } {
+  const expires = Math.floor(Date.now() / 1000) + 3600;
+  const payload = { sub: inviteeId, role: 'authenticated', aud: 'authenticated', exp: expires, iat: expires - 3600 };
+  const token = `${Buffer.from('{"alg":"HS256","typ":"JWT"}').toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.test-signature`;
+  const user = { id: inviteeId, aud: 'authenticated', role: 'authenticated', email: 'invitee@example.com', app_metadata: {}, user_metadata: { display_name: 'Invitee' } };
+  return { token, user, expires };
+}
+
+/** Seed a signed-in invitee session before the app boots. */
+async function signInInvitee(page: import('@playwright/test').Page): Promise<void> {
+  const { token, user, expires } = inviteeToken();
+  await page.addInitScript(({ key, session }) => {
+    localStorage.setItem(key, JSON.stringify(session));
+  }, {
+    key: 'sb-xzlimjmnspjmqjyqqxam-auth-token',
+    session: {
+      access_token: token, refresh_token: 'invitee-refresh', token_type: 'bearer',
+      expires_in: 3600, expires_at: expires, user,
+    },
+  });
+}
+
+interface CloudMockOptions {
+  join?: () => { status: number; body: string };
+  projectRow?: () => unknown;
+}
+
+/**
+ * Mock the Supabase REST surface for the invite flow. `projects` single-object
+ * reads return `projectRow()` (or the PostgREST "zero rows" error), the join
+ * RPC uses `join()`, and everything else responds with empty collections.
+ * Note: .single() sends Accept: vnd.pgrst.object; .maybeSingle() does not and
+ * unwraps 1-element arrays client-side.
+ */
+async function mockInviteCloud(page: import('@playwright/test').Page, opts: CloudMockOptions = {}): Promise<void> {
+  const { user } = inviteeToken();
+  const join = opts.join ?? (() => ({ status: 200, body: 'null' }));
+  const projectRow = opts.projectRow ?? (() => ({
+    id: inviteProjectId, name: 'Shared sculpture', mode: 'team',
+    owner_id: '00000000-0000-4000-8000-000000000002', version: 3,
+    updated_at: new Date().toISOString(),
+  }));
+  await page.route('https://xzlimjmnspjmqjyqqxam.supabase.co/**', async (route) => {
+    const url = new URL(route.request().url());
+    const method = route.request().method();
+    const table = url.pathname.split('/').pop() ?? '';
+    const wantsObject = (route.request().headers()['accept'] ?? '').includes('vnd.pgrst.object');
+    const json = (status: number, data: unknown) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
+
+    if (url.pathname.startsWith('/auth/v1/user')) return json(200, user);
+    if (url.pathname.startsWith('/auth/v1/token')) {
+      const { token } = inviteeToken();
+      return json(200, { access_token: token, token_type: 'bearer', expires_in: 3600, refresh_token: 'invitee-refresh', user });
+    }
+    if (url.pathname === '/rest/v1/rpc/join_project') {
+      const { status, body } = join();
+      return route.fulfill({ status, contentType: 'application/json', body });
+    }
+    if (table === 'projects' && method === 'GET') {
+      const row = projectRow();
+      if (wantsObject) {
+        if (row === null) return json(406, { code: 'PGRST116', details: 'Results contain 0 rows', message: 'JSON object requested, multiple (or no) rows returned' });
+        return json(200, row);
+      }
+      // A single-project read (id filter) vs the dashboard listing.
+      return json(200, url.searchParams.has('id') && row !== null ? [row] : []);
+    }
+    if (table === 'scenes') return json(200, wantsObject ? { id: inviteSceneId, data: {} } : [{ id: inviteSceneId, data: {} }]);
+    if (table === 'project_members') return json(200, wantsObject ? { role: 'viewer' } : [{ role: 'viewer' }]);
+    if (table === 'profiles') return json(201, []);
+    return json(200, []);
+  });
+}
+
+test('an invite link joins a signed-in invitee and opens the project', async ({ page }) => {
+  const joinCalls: unknown[] = [];
+  await mockInviteCloud(page, {
+    join: () => {
+      joinCalls.push(true);
+      return { status: 200, body: 'null' };
+    },
+  });
+  await signInInvitee(page);
+  await page.goto(`./#/join/${inviteProjectId}?code=abc12345`);
+  await expect(page.locator('#tb-name')).toContainText('Shared sculpture');
+  await expect(page.locator('#tb-mode')).toContainText('Team project');
+  expect(joinCalls).toEqual([true]);
+  // The pulled cloud copy is cached locally, so a later offline open works.
+  await expect.poll(() => page.evaluate(async (id) => {
+    const request = indexedDB.open('web3dstudio');
+    return new Promise<string | null>((resolve, reject) => {
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const read = db.transaction('projects', 'readonly').objectStore('projects').get(id);
+        read.onsuccess = () => { resolve(read.result?.name ?? null); db.close(); };
+      };
+    });
+  }, inviteProjectId)).toBe('Shared sculpture');
+});
+
+test('a missing join RPC reports the migration fix instead of a raw PostgREST error', async ({ page }) => {
+  await mockInviteCloud(page, {
+    join: () => ({
+      status: 404,
+      body: JSON.stringify({ code: 'PGRST202', details: null, hint: null, message: 'Could not find the function public.join_project(p_code, p_project_id) in the schema cache' }),
+    }),
+  });
+  await signInInvitee(page);
+  await page.goto(`./#/join/${inviteProjectId}?code=abc12345`);
+  await expect(page.locator('.toast-error').first()).toContainText('Join failed: Supabase database setup is incomplete');
+  await expect(page.locator('.toast-error').first()).toContainText('supabase/migrations');
+  // The invitee stays on the dashboard; nothing half-joined.
+  await expect(page.locator('#project-grid')).toBeVisible();
+  await expect(page.locator('.card-title')).toHaveCount(0);
+});
+
+test('opening a project the account cannot see explains access instead of "Project not found"', async ({ page }) => {
+  await mockInviteCloud(page, { projectRow: () => null });
+  await signInInvitee(page);
+  await page.goto(`./#/p/${inviteProjectId}`);
+  await expect(page.locator('#vp-overlay .error')).toContainText('Failed to open project:');
+  await expect(page.locator('#vp-overlay .error')).toContainText('does not have access');
+  await expect(page.locator('#vp-overlay .error')).toContainText('invite link');
+});
+
+test('an invite link survives the sign-in redirect', async ({ page }) => {
+  await mockInviteCloud(page);
+  // Signed out: the join link must send us to login, then resume afterwards.
+  await page.goto(`./#/join/${inviteProjectId}?code=abc12345`);
+  await expect(page.locator('#auth-form')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('w3ds.pendingInvite'))).toContain(inviteProjectId);
+  await page.locator('#a-email').fill('invitee@example.com');
+  await page.locator('#a-pass').fill('testing-password-123');
+  await page.locator('#a-go').click();
+  await expect(page.locator('#tb-name')).toContainText('Shared sculpture');
+  expect(new URL(page.url()).hash).toBe(`#/p/${inviteProjectId}`);
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('w3ds.pendingInvite'))).toBe(null);
+});

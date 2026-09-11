@@ -1,7 +1,7 @@
 import './styles.css';
 import { auth } from './lib/auth.js';
 import { Router, type Route } from './ui/router.js';
-import { mountDashboard, mountLogin, handleJoinRoute } from './ui/dashboard.js';
+import { mountDashboard, mountLogin, handleJoinRoute, resumePendingInviteIfSignedIn } from './ui/dashboard.js';
 import { toast } from './ui/toast.js';
 import { registerPwa } from './pwa.js';
 import { initAi } from './ai/index.js';
@@ -16,6 +16,9 @@ async function boot(): Promise<void> {
   } catch (e) {
     console.error('auth init failed', e);
   }
+  // An invite link that sent the user through sign-in (e.g. a magic-link
+  // email return) resumes here instead of being lost on the dashboard.
+  resumePendingInviteIfSignedIn();
 
   void initAi().catch((e) => console.warn('AI init failed', e));
 

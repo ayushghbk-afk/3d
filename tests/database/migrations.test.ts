@@ -119,6 +119,26 @@ describe('fresh schema and RLS', () => {
     await db.exec(await readFile(new URL('20260908000003_cloud_repairs.sql', migrations), 'utf8'));
     expect((await db.query('select * from public.projects')).rows).toHaveLength(1);
   });
+  it('recreates the join RPC and baseline grants idempotently (20260911000000)', async () => {
+    const repair = await readFile(new URL('20260911000000_invite_join_repair.sql', migrations), 'utf8');
+    await db.exec(repair);
+    await db.exec(repair); // rerunning must stay safe
+    // The RPC contract the frontend calls is intact after the repair.
+    const { rows } = await db.query("select pg_get_function_identity_arguments(oid) as args, pg_get_function_result(oid) as result from pg_proc where oid = 'public.join_project(uuid,text)'::regprocedure");
+    expect(rows).toEqual([{ args: 'p_project_id uuid, p_code text', result: 'void' }]);
+    // Baseline table grants are restored: anon can reach the tables, but RLS
+    // still hides every row from it.
+    await db.exec('set role anon;');
+    expect((await db.query('select * from public.projects')).rows).toHaveLength(0);
+    expect((await db.query('select * from public.profiles')).rows).toHaveLength(0);
+    // And a fresh user can still join through the repaired RPC.
+    const joiner = '00000000-0000-4000-8000-000000000006';
+    await db.exec('reset role;');
+    await db.exec(`insert into auth.users(id) values ('${joiner}')`);
+    await asUser(joiner);
+    await db.query('select public.join_project($1, $2)', [project, 'correct-code']);
+    expect((await db.query<{ role: string }>('select public.project_role($1) as role', [project])).rows[0].role).toBe('viewer');
+  });
 });
 
 describe('invites', () => {
@@ -133,6 +153,27 @@ describe('invites', () => {
     await asUser(editor);
     await db.query('select public.join_project($1, $2)', [project, 'correct-code']);
     expect((await db.query<{ role: string }>('select public.project_role($1) as role', [project])).rows[0].role).toBe('editor');
+  });
+  it('lets a fresh member read everything the client pulls after joining', async () => {
+    // Seed the project graph as the owner (superuser bypasses RLS for setup).
+    await db.exec(`
+      insert into public.scenes(id, project_id) values ('30000000-0000-4000-8000-000000000002', '${project}');
+      insert into public.scene_objects(scene_id, project_id, name) values ('30000000-0000-4000-8000-000000000002', '${project}', 'Cube');
+      insert into public.materials(project_id, scene_id, name) values ('${project}', '30000000-0000-4000-8000-000000000002', 'Mat');
+      insert into public.animations(project_id, scene_id, name) values ('${project}', '30000000-0000-4000-8000-000000000002', 'Clip');
+    `);
+    const joiner = '00000000-0000-4000-8000-000000000005';
+    await db.exec(`insert into auth.users(id) values ('${joiner}')`);
+    await asUser(joiner);
+    await db.query('select public.join_project($1, $2)', [project, 'correct-code']);
+    // The exact read set of SyncEngine.pullStandalone: if any of these is
+    // blocked, the editor shows a misleading "Project not found".
+    expect((await db.query('select * from public.projects')).rows).toHaveLength(1);
+    expect((await db.query('select * from public.scenes')).rows).toHaveLength(1);
+    expect((await db.query('select * from public.scene_objects')).rows).toHaveLength(1);
+    expect((await db.query('select * from public.materials')).rows).toHaveLength(1);
+    expect((await db.query('select * from public.animations')).rows).toHaveLength(1);
+    expect((await db.query('select * from public.assets')).rows).toHaveLength(1);
   });
   it('does not allow anonymous joins', async () => {
     await db.exec('set role anon;');

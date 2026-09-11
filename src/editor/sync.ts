@@ -352,7 +352,12 @@ export class SyncEngine {
       };
     } catch (e) {
       console.warn('cloud pull failed', e);
-      return localDb.getProject(projectId);
+      // A local copy keeps offline-first sessions working. Without one — e.g.
+      // a freshly clicked invite link — surface the real cause instead of
+      // returning null, which the caller would misreport as "Project not found".
+      const local = await localDb.getProject(projectId);
+      if (local) return local;
+      throw new Error(cloudErrorMessage(e));
     }
   }
 
@@ -706,7 +711,9 @@ export class SyncEngine {
   static async joinWithCode(projectId: string, code: string): Promise<string | null> {
     if (!cloudEnabled) return 'Cloud unavailable';
     const { error } = await supabase().rpc('join_project', { p_project_id: projectId, p_code: code });
-    return error ? error.message : null;
+    // Map through cloudErrorMessage so a missing RPC (PGRST202) or incomplete
+    // schema says "run the migrations" instead of a raw PostgREST message.
+    return error ? cloudErrorMessage(error) : null;
   }
 
   dispose(): void {
