@@ -397,7 +397,7 @@ function buildCommands(): Command[] {
     { id: 'project.exportGlb', title: 'Export GLB', group: 'Project', icon: '📤', run: (s) => void s.exportGlb() },
     { id: 'project.exportObj', title: 'Export OBJ', group: 'Project', icon: '📤', run: (s) => void s.exportObj() },
     { id: 'project.exportPng', title: 'Render PNG Image', group: 'Project', icon: '🖼', run: (s) => void s.exportPng() },
-    { id: 'project.exportWeb', title: 'Export Web Scene (single HTML file)', group: 'Project', icon: '🌐', run: (s) => void s.exportWebScene() },
+    { id: 'project.exportWeb', title: 'Export Playable Web Game (single HTML file)', group: 'Project', icon: '🌐', keywords: 'play wasd physics game html', run: (s) => void s.exportWebScene() },
     { id: 'project.exportModal', title: 'Export / Download…', group: 'Project', icon: '📦', run: (s) => openExportModal(s) },
     { id: 'project.backup', title: 'Download Backup (.3dproject)', group: 'Project', icon: '🗄', run: (s) => void s.exportProjectBackup() },
     { id: 'project.importBackup', title: 'Import Backup…', group: 'Project', icon: '📥', run: () => getCommandHost()?.openImportBackup() },

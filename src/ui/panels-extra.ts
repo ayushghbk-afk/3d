@@ -12,7 +12,7 @@ export function openExportModal(s: EditorSession): void {
     { icon: '📦', title: 'GLB / glTF', hint: 'Meshes, materials and animation clips', run: () => void s.exportGlb() },
     { icon: '🧱', title: 'OBJ', hint: 'Plain geometry, no materials', run: () => void s.exportObj() },
     { icon: '🖼', title: 'PNG render', hint: 'Current camera at 1920×1080', run: () => void s.exportPng(1920, 1080) },
-    { icon: '🌐', title: 'Web scene', hint: 'One HTML file you can host anywhere', run: () => void s.exportWebScene() },
+    { icon: '🌐', title: 'Playable web game', hint: 'One HTML file with ▶ Play, WASD/touch controls and physics', run: () => void s.exportWebScene() },
     { icon: '🗄', title: 'Backup (.3dproject)', hint: 'Full project, re-importable', run: () => void s.exportProjectBackup() },
     { icon: '📥', title: 'Import backup…', hint: 'Restore a .3dproject file', run: () => void s.importProjectBackupFile() },
   ];
