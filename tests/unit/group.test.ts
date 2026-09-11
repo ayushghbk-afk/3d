@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from 'vitest';
 import * as THREE from 'three';
-import { EditorSession } from '../../src/editor/session';
-import { History } from '../../src/editor/history';
-import { Store } from '../../src/state/store';
+import type { EditorSession } from '../../src/editor/session';
 import {
   createProjectDoc, defaultObject, type SceneObjectData,
 } from '../../src/state/models';
+import { History } from '../../src/editor/history';
+import { makeStubSession } from '../helpers/stub-session';
 
 /**
  * Group/hierarchy regressions, exercised through the real EditorSession
@@ -20,68 +20,7 @@ import {
  */
 
 function makeSession() {
-  const doc = createProjectDoc('T', 'solo', 'guest');
-  const objects = new Map<string, THREE.Object3D>();
-  const scene = new THREE.Group();
-  const viewport = {
-    scene,
-    objects,
-    outline: vi.fn(),
-    captureThumbnail: () => null,
-    syncMaterials: () => undefined,
-    fixParenting: () => undefined,
-    addObject: (d: SceneObjectData) => {
-      let o = objects.get(d.id);
-      if (!o) {
-        o = new THREE.Group();
-        objects.set(d.id, o);
-      }
-      // real Viewport.applyTransform mirrors the doc onto the mirror object
-      o.position.set(d.position.x, d.position.y, d.position.z);
-      o.rotation.set(d.rotation.x, d.rotation.y, d.rotation.z);
-      o.scale.set(d.scale.x, d.scale.y, d.scale.z);
-      o.userData.objectId = d.id;
-      o.parent?.remove(o);
-      const parent = d.parentId ? objects.get(d.parentId) : null;
-      (parent ?? scene).add(o);
-      return o;
-    },
-    updateObject: (d: SceneObjectData) => { viewport.addObject(d); },
-    removeObject: (id: string) => { const o = objects.get(id); o?.parent?.remove(o); objects.delete(id); },
-    clearAll: () => { for (const id of [...objects.keys()]) viewport.removeObject(id); },
-    getCameraState: () => ({ type: 'perspective', position: { x: 4, y: 3, z: 6 }, target: { x: 0, y: 0, z: 0 }, fov: 50 }),
-    setCameraState: () => undefined,
-  };
-  const session = Object.assign(Object.create(EditorSession.prototype), {
-    doc, viewport,
-    history: new History(),
-    gizmo: { attach: vi.fn(), controls: { dragging: false } },
-    selection: new Store<string | null>(null),
-    transformMode: new Store('translate'),
-    cameraType: new Store('perspective'),
-    canEdit: new Store(true),
-    locks: new Store(new Map<string, unknown>()),
-    saveState: new Store('local'),
-    syncError: new Store(null),
-    online: new Store(true),
-    peers: new Store([]),
-    rev: new Store(0),
-    snap: new Store(false),
-    loop: new Store(true),
-    autoKey: new Store(false),
-    anim: new Store({ playing: false, frame: 0, length: 90, fps: 30 }),
-    playback: { frame: 0, playing: false, loop: true, setFrame: vi.fn() },
-    scheduleLocal: vi.fn(), scheduleCloud: vi.fn(), broadcastTransform: vi.fn(),
-    scriptEngine: { invalidate: vi.fn() },
-    lastThumb: Date.now(),
-    userId: 'guest', userName: 'Guest', disposed: false,
-    blobs: new Map<string, ArrayBuffer>(), textures: new Map<string, THREE.Texture>(),
-    sync: {
-      broadcastOp: vi.fn().mockResolvedValue(undefined),
-      broadcastLock: vi.fn(), broadcastMaterial: vi.fn(),
-      presenceEditing: vi.fn(),
-    },
-  }) as unknown as EditorSession;
+  const { session, doc, viewport, objects } = makeStubSession();
   return { session, doc, viewport, objects };
 }
 

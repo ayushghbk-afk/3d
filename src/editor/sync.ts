@@ -5,7 +5,7 @@ import { auth } from '../lib/auth.js';
 import { cloudErrorMessage } from '../lib/cloud-errors.js';
 import { localDb } from '../lib/indexeddb.js';
 import { uid, nowIso } from '../lib/utils.js';
-import type { MaterialData, PresenceUser, ProjectDoc, ProjectMode, SceneObjectData, TeamRole } from '../state/models.js';
+import { defaultMaterial, type MaterialData, type PresenceUser, type ProjectDoc, type ProjectMode, type SceneObjectData, type TeamRole } from '../state/models.js';
 
 // Supabase sync: durable upserts (debounced) + Realtime Broadcast/Presence.
 // Local-mode safe: every method no-ops when cloud is unavailable.
@@ -315,7 +315,8 @@ export class SyncEngine {
         objects,
         settings: cloudSettings ?? local?.settings ?? { envIntensity: 1, shadows: true },
         materials: ((mats ?? []) as Record<string, unknown>[]).map((m) => ({
-          id: m.id as string, name: (m.name as string) ?? 'Material',
+          ...defaultMaterial((m.name as string) ?? 'Material'),
+          id: m.id as string,
           baseColor: (m.base_color as string) ?? '#8b9bb4',
           metalness: Number(m.metalness ?? 0.1), roughness: Number(m.roughness ?? 0.7),
           emissive: (m.emissive as string) ?? '#000000', emissiveIntensity: Number(m.emissive_intensity ?? 0),
@@ -323,9 +324,23 @@ export class SyncEngine {
           side: ((m.side as string) ?? 'front') as 'front' | 'double',
           flatShading: Boolean(m.flat_shading),
           mapAssetId: (m.map_asset_id as string) ?? null,
+          // extended PBR fields, when the cloud row carries them
+          normalMapAssetId: (m.normal_map_asset_id as string) ?? null,
+          normalScale: Number(m.normal_scale ?? 1),
+          aoMapAssetId: (m.ao_map_asset_id as string) ?? null,
+          aoIntensity: Number(m.ao_intensity ?? 1),
+          transmission: Number(m.transmission ?? 0),
+          ior: Number(m.ior ?? 1.5),
+          thickness: Number(m.thickness ?? 0.5),
+          clearcoat: Number(m.clearcoat ?? 0),
+          clearcoatRoughness: Number(m.clearcoat_roughness ?? 0.1),
           updatedAt: (m.updated_at as string) ?? nowIso(),
         })),
         clips,
+        collections: local?.collections ?? [],
+        cameraBookmarks: local?.cameraBookmarks ?? [],
+        activity: local?.activity ?? [],
+        uiLayout: local?.uiLayout ?? null,
         assets: ((assets ?? []) as Record<string, unknown>[]).map((a) => ({
           id: a.id as string, name: (a.name as string) ?? 'asset', kind: ((a.kind as string) ?? 'other') as 'model' | 'texture' | 'other',
           mime: (a.mime as string) ?? '', size: Number(a.size_bytes ?? 0),
@@ -454,6 +469,29 @@ export class SyncEngine {
         if (m.actor === me.id) return;
         this.session.applyRemoteMaterial(m.data);
       })
+      .on('broadcast', { event: 'selection' }, ({ payload }) => {
+        const p = payload as { ids: string[]; actor: string; user: { id: string; name: string; color: string } };
+        if (!p || p.actor === this.session.user().id) return;
+        this.session.peerSelections.update((prev) => {
+          const next = new Map(prev);
+          next.set(p.user.id, { ids: p.ids ?? [], name: p.user.name, color: p.user.color });
+          return next;
+        });
+      })
+      .on('broadcast', { event: 'cursor' }, ({ payload }) => {
+        const p = payload as { x: number; y: number; actor: string; user: { id: string; name: string; color: string } };
+        if (!p || p.actor === this.session.user().id) return;
+        this.session.peerCursors.update((prev) => {
+          const next = new Map(prev);
+          next.set(p.user.id, { x: p.x, y: p.y, name: p.user.name, color: p.user.color, at: Date.now() });
+          return next;
+        });
+      })
+      .on('broadcast', { event: 'activity' }, ({ payload }) => {
+        const p = payload as { entry: import('../state/models.js').ActivityEntry; actor: string };
+        if (!p || p.actor === this.session.user().id) return;
+        this.session.pushActivity(p.entry, false);
+      })
       .on('broadcast', { event: 'lock' }, ({ payload }) => {
         const m = payload as LockMsg;
         if (m.user.id === me.id) return;
@@ -518,6 +556,33 @@ export class SyncEngine {
   broadcastMaterial(m: MaterialData): void {
     if (!this.channel || !this.session.canEdit.get()) return;
     void this.channel.send({ type: 'broadcast', event: 'material', payload: { data: m, actor: this.session.user().id } });
+  }
+
+  /** Share what we have selected so peers see coloured selection indicators. */
+  broadcastSelection(ids: string[]): void {
+    if (!this.channel) return;
+    const u = this.session.user();
+    void this.channel.send({
+      type: 'broadcast', event: 'selection',
+      payload: { ids, actor: u.id, user: { id: u.id, name: u.name, color: this.selfColor } },
+    });
+  }
+
+  /** Live pointer position in normalised device coordinates (live cursors). */
+  broadcastCursor(x: number, y: number): void {
+    if (!this.channel) return;
+    const u = this.session.user();
+    void this.channel.send({
+      type: 'broadcast', event: 'cursor',
+      payload: { x, y, actor: u.id, user: { id: u.id, name: u.name, color: this.selfColor } },
+    });
+  }
+
+  /** Share an activity-feed entry (adds, deletes, saves…). */
+  broadcastActivity(entry: import('../state/models.js').ActivityEntry): void {
+    if (!this.channel) return;
+    const u = this.session.user();
+    void this.channel.send({ type: 'broadcast', event: 'activity', payload: { entry, actor: u.id } });
   }
 
   broadcastLock(objectId: string, name: string | null, acquire: boolean): void {

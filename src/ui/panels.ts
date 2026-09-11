@@ -149,29 +149,76 @@ export function openVersionsModal(s: EditorSession): void {
 
 // ---------- shortcuts ----------
 export function openShortcutsModal(): void {
-  const rows: [string, string][] = [
-    ['W / E / R', 'Move / Rotate / Scale gizmo'],
-    ['V', 'Deselect'],
-    ['F', 'Focus selected'],
-    ['Delete', 'Delete selected'],
-    ['Ctrl/⌘ + D', 'Duplicate'],
-    ['Ctrl/⌘ + Z', 'Undo'],
-    ['Ctrl/⌘ + Shift + Z', 'Redo'],
-    ['Ctrl/⌘ + S', 'Save now'],
-    ['Space', 'Play / pause'],
-    ['A', 'Toggle ✨ AI Studio (draggable, resizable)'],
-    ['J', 'Toggle Scripts (control meshes, keyframes, camera)'],
-    ['F11 / ⛶', 'Fullscreen — hide browser chrome; tools auto-hide when idle'],
-    ['Esc', 'Show tools, or exit fullscreen'],
-    ['Drag panel edges', 'Resize outliner / inspector / timeline'],
-    ['Double-click panel edge', 'Collapse / restore panel'],
-    ['1-finger drag', 'Orbit (touch)'],
-    ['2-finger', 'Pan + pinch zoom (touch)'],
-    ['Tap', 'Select (touch)'],
+  const groups: [string, [string, string][]][] = [
+    ['Selection', [
+      ['Click / Tap', 'Select (Shift or Ctrl adds to the selection)'],
+      ['Ctrl/⌘ + drag', 'Box select'],
+      ['Ctrl/⌘ + A', 'Select all'],
+      ['Ctrl/⌘ + I', 'Invert selection'],
+      ['Tab / Shift+Tab', 'Cycle next / previous object'],
+      ['V', 'Deselect'],
+      ['/', 'Solo (isolate) the selection'],
+      ['H / Shift+H', 'Hide selection / show everything'],
+    ]],
+    ['Transform', [
+      ['W / E / R', 'Move / Rotate / Scale gizmo'],
+      ['X', 'Toggle local / world gizmo space'],
+      ['Alt + R', 'Reset transform'],
+      ['Ctrl/⌘ + Shift + A', 'Apply all transforms (bake into geometry)'],
+      ['Ctrl/⌘ + D', 'Duplicate selection'],
+      ['Ctrl/⌘ + G', 'Group selection'],
+      ['Ctrl/⌘ + Shift + G', 'Ungroup'],
+      ['Delete', 'Delete selection'],
+    ]],
+    ['Animation', [
+      ['Space', 'Play / pause'],
+      ['K', 'Keyframe everything on the selection'],
+      [', / .', 'Jump to previous / next keyframe'],
+    ]],
+    ['View', [
+      ['F', 'Frame selected'],
+      ['Shift + F', 'Frame all'],
+      ['Alt + 1 / 3 / 7', 'Front / Right / Top view'],
+      ['Alt + 5', 'Perspective / orthographic'],
+      ['G', 'Toggle grid'],
+      ['Z', 'Toggle wireframe'],
+      ['F11 or ⛶', 'Fullscreen — tools auto-hide when idle'],
+      ['Esc', 'Show tools, or exit fullscreen'],
+    ]],
+    ['Panels & modes', [
+      ['Ctrl/⌘ + K', 'Command palette (every action, searchable)'],
+      ['Shift + A', 'Add-object palette'],
+      ['A', 'Toggle ✨ AI Studio (draggable, resizable)'],
+      ['J', 'Toggle { } Scripts'],
+      ['P', 'Enter / exit ▶ Play Mode'],
+      ['?', 'This shortcut sheet'],
+    ]],
+    ['Project', [
+      ['Ctrl/⌘ + S', 'Save now'],
+      ['Ctrl/⌘ + Z', 'Undo'],
+      ['Ctrl/⌘ + Shift + Z', 'Redo'],
+      ['Drag panel edges', 'Resize outliner / inspector / timeline / dope sheet'],
+      ['Double-click panel edge', 'Collapse / restore panel'],
+    ]],
+    ['Touch', [
+      ['1-finger drag', 'Orbit'],
+      ['2-finger drag', 'Pan'],
+      ['Pinch', 'Zoom'],
+      ['Long press', 'Select (adds to the selection)'],
+      ['Double tap', 'Focus the object under your finger'],
+    ]],
   ];
+  const body = groups
+    .map(
+      ([title, rows]) => `<div class="keys-group">
+        <h4>${title}</h4>
+        <table class="keys">${rows.map(([k, d]) => `<tr><td><kbd>${k}</kbd></td><td>${d}</td></tr>`).join('')}</table>
+      </div>`,
+    )
+    .join('');
   openModal({
     title: 'Keyboard & touch',
-    body: `<table class="keys">${rows.map(([k, d]) => `<tr><td><kbd>${k}</kbd></td><td>${d}</td></tr>`).join('')}</table>`,
+    body: `<div class="keys-groups">${body}</div>`,
     actions: [{ label: 'Close', kind: 'primary' }],
   });
 }
