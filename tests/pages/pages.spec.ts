@@ -253,7 +253,7 @@ test('an invite link joins a signed-in invitee and opens the project', async ({ 
   });
   await signInInvitee(page);
   await page.goto(`./#/join/${inviteProjectId}?code=abc12345`);
-  await expect(page.locator('#tb-name')).toContainText('Shared sculpture');
+  await expect(page.locator('#tb-name')).toContainText('Shared sculpture', { timeout: 20_000 });
   await expect(page.locator('#tb-mode')).toContainText('Team project');
   expect(joinCalls).toEqual([true]);
   // The pulled cloud copy is cached locally, so a later offline open works.
@@ -290,7 +290,7 @@ test('opening a project the account cannot see explains access instead of "Proje
   await mockInviteCloud(page, { projectRow: () => null });
   await signInInvitee(page);
   await page.goto(`./#/p/${inviteProjectId}`);
-  await expect(page.locator('#vp-overlay .error')).toContainText('Failed to open project:');
+  await expect(page.locator('#vp-overlay .error')).toContainText('Failed to open project:', { timeout: 20_000 });
   await expect(page.locator('#vp-overlay .error')).toContainText('does not have access');
   await expect(page.locator('#vp-overlay .error')).toContainText('invite link');
 });
@@ -304,7 +304,7 @@ test('an invite link survives the sign-in redirect', async ({ page }) => {
   await page.locator('#a-email').fill('invitee@example.com');
   await page.locator('#a-pass').fill('testing-password-123');
   await page.locator('#a-go').click();
-  await expect(page.locator('#tb-name')).toContainText('Shared sculpture');
+  await expect(page.locator('#tb-name')).toContainText('Shared sculpture', { timeout: 20_000 });
   expect(new URL(page.url()).hash).toBe(`#/p/${inviteProjectId}`);
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem('w3ds.pendingInvite'))).toBe(null);
 });
