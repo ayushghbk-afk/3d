@@ -54,6 +54,16 @@ export interface ImageGenResult {
   seed: number;
   provider: string;
   prompt: string;
+  /**
+   * Model the provider actually asked for — the free Pollinations tier swaps
+   * unsupported names (flux → sana), so this is what really produced the image.
+   */
+  model?: string;
+  /** Which access path served the request. */
+  tier?: 'keyed' | 'anonymous';
+  /** Set when the preferred path (e.g. a configured key) failed and the free
+   * tier served the request instead — the image is fine, the setup is not. */
+  warning?: string;
 }
 
 export interface MeshGenOptions {

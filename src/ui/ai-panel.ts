@@ -1,5 +1,5 @@
 // ✨ AI panel: free 3D generation (TripoSR), free texture generation
-// (Pollinations Flux), project Q&A, Agent API management and custom API setup.
+// (Pollinations image tier), project Q&A, Agent API management and custom API setup.
 import type { EditorSession } from '../editor/session.js';
 import type { PrimitiveType } from '../state/models.js';
 import { toAiContext } from '../editor/serialization.js';
@@ -75,7 +75,7 @@ function providerBadge(): string {
     : s.meshProvider === 'triposr'
       ? 'TripoSR (free, no key)'
       : 'Stable Fast 3D (free, no key)';
-  const img = s.imageProvider === 'custom' ? 'Custom image API' : 'Pollinations Flux (free, no key)';
+  const img = s.imageProvider === 'custom' ? 'Custom image API' : 'Pollinations free tier (no key)';
   return `<p class="small muted">3D: <b>${escapeHtml(mesh)}</b> · Textures: <b>${escapeHtml(img)}</b> · <a href="#" id="ai-goto-setup">change</a></p>`;
 }
 
@@ -255,7 +255,7 @@ function renderTextureTab(session: EditorSession, body: HTMLElement): void {
   const s = aiSettings.get();
   const mats = session.doc.materials;
   body.innerHTML = `
-    <div class="banner banner-info">Free text-to-texture (<b>Pollinations Flux</b>, no key): describe a surface and it is applied as the material's base-color map. AI can drive this from the <b>Agent API</b> (<code>texture.generate</code>) and the dedicated <b>Texture API</b> (<code>window.Web3DStudio.textures</code>). Anonymous tier ≈ 1 image / 15s.</div>
+    <div class="banner banner-info">Free text-to-texture (<b>Pollinations</b>, no key): describe a surface and it is applied as the material's base-color map. AI can drive this from the <b>Agent API</b> (<code>texture.generate</code>) and the dedicated <b>Texture API</b> (<code>window.Web3DStudio.textures</code>). Anonymous tier ≈ 1 image / 15s, and no longer runs FLUX — add a free key in <b>⚙️ Setup</b> to get <code>black-forest-labs/flux</code> via gen.pollinations.ai.</div>
     ${providerBadge()}
     <label class="field">Describe the texture
       <textarea id="aitex-prompt" class="input" rows="2" placeholder="e.g. rusty corrugated metal"></textarea>
@@ -333,7 +333,7 @@ function renderTextureTab(session: EditorSession, body: HTMLElement): void {
       barEl.style.width = '100%';
       const url = URL.createObjectURL(result.blob);
       const matName = session.doc.materials.find((m) => m.id === matId)?.name ?? 'material';
-      resultEl.innerHTML = `<div class="banner banner-info">✅ Texture applied to <b>${escapeHtml(matName)}</b> (via ${escapeHtml(result.provider)}, seed ${result.seed}).${fallback ? `<br />Fallback: ${escapeHtml(fallback.to)} — ${escapeHtml(fallback.reason)}` : ''}</div><img src="${url}" class="ai-preview" alt="Generated texture preview" />`;
+      resultEl.innerHTML = `<div class="banner banner-info">✅ Texture applied to <b>${escapeHtml(matName)}</b> (via ${escapeHtml(result.provider)}${result.model ? ` / ${escapeHtml(result.model)}` : ''}, seed ${result.seed}).${fallback ? `<br />Fallback: ${escapeHtml(fallback.to)} — ${escapeHtml(fallback.reason)}` : ''}${result.warning ? `<br />⚠️ ${escapeHtml(result.warning)}` : ''}</div><img src="${url}" class="ai-preview" alt="Generated texture preview" />`;
       toast('Texture applied', 'success');
     } catch (e) {
       if ((e as Error)?.name === 'AbortError') resultEl.innerHTML = '<p class="muted">Cancelled.</p>';
@@ -899,7 +899,7 @@ function renderSettingsTab(body: HTMLElement): void {
       </div>
       <p class="small" id="ai-assistant-test-out-custom"></p>
     </div>
-    ${customBlock('ai-image', '🎨 Textures & images', 'Pollinations Flux free', s.imageProvider, 'pollinations', s.imageCustom, 'https://api.openai.com/v1', 'dall-e-3', 'POST {base}/images/generations')}
+    ${customBlock('ai-image', '🎨 Textures & images', 'Pollinations free tier', s.imageProvider, 'pollinations', s.imageCustom, 'https://api.openai.com/v1', 'dall-e-3', 'POST {base}/images/generations')}
     <div class="panel-sub">🧊 3D models</div>
     <div class="radio-row">
       <label><input type="radio" name="ai-mesh-prov" value="sf3d" ${s.meshProvider === 'sf3d' ? 'checked' : ''} /> Stable Fast 3D (best, free)</label>
@@ -924,8 +924,8 @@ function renderSettingsTab(body: HTMLElement): void {
     <label class="field">Hugging Face token (optional, shorter queues on both Spaces — free at huggingface.co)
       <input id="ai-hf" class="input" type="password" placeholder="hf_…" value="${escapeHtml(s.hfToken)}" />
     </label>
-    <label class="field">Pollinations key (optional Ask fallback + higher texture limits — free at <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noreferrer">enter.pollinations.ai/keys</a>)
-      <input id="ai-pollkey" class="input" type="password" placeholder="sk_…" value="${escapeHtml(s.pollinationsKey)}" />
+    <label class="field">Pollinations key (Ask fallback + real FLUX textures — free at <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noreferrer">enter.pollinations.ai/keys</a>)
+      <input id="ai-pollkey" class="input" type="password" placeholder="pk_… (app key — sk_ keys are server-only)" value="${escapeHtml(s.pollinationsKey)}" />
     </label>
     <div class="row-between">
       <span class="small muted">Paste key → Save, then Test.</span>

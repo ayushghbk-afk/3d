@@ -1,10 +1,24 @@
 // FREE default providers (no signup, no API key):
-// - Textures/images: Pollinations Flux endpoint (URL-based, CORS-enabled).
+// - Textures/images: Pollinations' legacy image host (URL-based, CORS-enabled).
 // - Assistant chat: Pollinations OpenAI-compatible text endpoint.
 // Anonymous image tier is throttled (~1 request / 15s); chat models vary —
 // both stay optional and every call has an offline/custom fallback.
+//
+// Upstream reality check (probed live on 2026-09-12, do not "fix" by faith):
+// - `GET https://image.pollinations.ai/models` (anonymous free tier) returns
+//   `["sana"]`. Asking that host for `model=flux` still returns a JPEG, but the
+//   response's own `requestParameters.model` says `sana` — the host silently
+//   substitutes its default. So "free tier = FLUX" is no longer true; we ask for
+//   flux, detect what is actually served, and report that instead of lying.
+// - Real FLUX (black-forest-labs/flux.1-schnell alias, flux.2-pro/flex) lives on
+//   the keyed unified API `https://gen.pollinations.ai/image/{prompt}`, which
+//   answers 401 without a key (Pollen credits, $1 ≈ 1 Pollen). If the user has
+//   pasted a key we route images there and FLUX really is used.
+// - `enhance`, `nologo` and `negative_prompt` were removed upstream on
+//   2026-06-10 ("they weren't doing anything anyway"). They are still *accepted*
+//   and ignored. `nologo` is kept for self-hosted mirrors; `enhance` is not sent.
 import type { AgentMessage, ChatOptions, ImageGenOptions, ImageGenResult } from './types.js';
-import { fetchWithTimeout, randomSeed, type ChatProvider, type ImageProvider } from './providers.js';
+import { fetchWithTimeout, hostOf, randomSeed, type ChatProvider, type ImageProvider } from './providers.js';
 
 export const POLLINATIONS_IMAGE_BASE = 'https://image.pollinations.ai';
 export const POLLINATIONS_TEXT_BASE = 'https://text.pollinations.ai';
@@ -12,24 +26,35 @@ export const POLLINATIONS_TEXT_BASE = 'https://text.pollinations.ai';
 export const POLLINATIONS_GEN_BASE = 'https://gen.pollinations.ai';
 export const POLLINATIONS_FREE_IMAGE_MODEL = 'flux';
 export const POLLINATIONS_FREE_CHAT_MODEL = 'openai';
+/** Where the free tier publishes the models it actually serves. */
+export const POLLINATIONS_IMAGE_MODELS_URL = `${POLLINATIONS_IMAGE_BASE}/models`;
+/** Aliases that all mean "some FLUX variant" and may be rewritten by the host. */
+export const FLUX_MODEL_ALIASES: readonly string[] = [
+  'flux',
+  'flux-schnell',
+  'flux-dev',
+  'turbo',
+  'black-forest-labs/flux.1-schnell',
+  'black-forest-labs/flux.1-dev',
+  'black-forest-labs/flux.2-pro',
+  'black-forest-labs/flux.2-flex',
+];
 
 export interface PollinationsImageParams {
   width: number;
   height: number;
   model: string;
   seed: number;
+  /** Accepted but ignored by pollinations.ai since 2026-06-10; keep for mirrors. */
   nologo: boolean;
+  /** Identifies the app on the anonymous tier (no key needed). */
   referrer: string;
   /** Optional user key (?key=) — raises anonymous limits where honored. */
   key?: string;
 }
 
-/** Pure URL builder (unit-tested) for the free image endpoint. */
-export function buildPollinationsImageUrl(
-  prompt: string,
-  params: Partial<PollinationsImageParams> = {},
-  base: string = POLLINATIONS_IMAGE_BASE,
-): string {
+/** Shared query string for both image endpoints. */
+function imageQuery(params: Partial<PollinationsImageParams>): URLSearchParams {
   const width = clampInt(params.width ?? 512, 64, 2048);
   const height = clampInt(params.height ?? 512, 64, 2048);
   const seed = params.seed ?? randomSeed();
@@ -39,17 +64,120 @@ export function buildPollinationsImageUrl(
     height: String(height),
     model,
     seed: String(seed),
+    // Legacy no-op on pollinations.ai since 2026-06-10; still honored by
+    // self-hosted mirrors, and harmless here. `enhance` is deliberately absent.
     nologo: params.nologo === false ? 'false' : 'true',
   });
   if (params.referrer) q.set('referrer', params.referrer);
   if (params.key) q.set('key', params.key);
+  return q;
+}
+
+/** Pure URL builder (unit-tested) for the free image endpoint. */
+export function buildPollinationsImageUrl(
+  prompt: string,
+  params: Partial<PollinationsImageParams> = {},
+  base: string = POLLINATIONS_IMAGE_BASE,
+): string {
+  const q = imageQuery(params);
   return `${base.replace(/\/+$/, '')}/prompt/${encodeURIComponent(prompt.slice(0, 2000))}?${q.toString()}`;
+}
+
+/**
+ * Keyed unified API (`/image/{prompt}`) — the only path that still reaches the
+ * real FLUX weights. The key travels in an `Authorization` header (see
+ * `PollinationsImageProvider`), never in the URL, so it cannot leak into
+ * browser history, service-worker logs or a shared image URL.
+ */
+export function buildPollinationsGenImageUrl(
+  prompt: string,
+  params: Partial<PollinationsImageParams> = {},
+  base: string = POLLINATIONS_GEN_BASE,
+): string {
+  const q = imageQuery({ ...params, key: undefined, referrer: undefined });
+  return `${base.replace(/\/+$/, '')}/image/${encodeURIComponent(prompt.slice(0, 2000))}?${q.toString()}`;
 }
 
 function clampInt(v: number, min: number, max: number): number {
   if (!Number.isFinite(v)) return min;
   return Math.max(min, Math.min(max, Math.round(v)));
 }
+
+/** Accepts `["sana", …]` or the catalog shape `[{name, id, aliases}, …]`. */
+export function parsePollinationsModelList(raw: unknown): string[] {
+  const arr = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { data?: unknown })?.data)
+      ? ((raw as { data: unknown[] }).data as unknown[])
+      : [];
+  const out: string[] = [];
+  const push = (v: unknown): void => {
+    if (typeof v === 'string' && v.trim() && !out.includes(v.trim())) out.push(v.trim());
+  };
+  for (const item of arr.slice(0, 64)) {
+    if (typeof item === 'string') {
+      push(item);
+      continue;
+    }
+    const o = item as { name?: string; id?: string; aliases?: unknown };
+    push(o?.name);
+    push(o?.id);
+    if (Array.isArray(o?.aliases)) for (const a of o.aliases as unknown[]) push(a);
+  }
+  return out;
+}
+
+/**
+ * What model should we actually name in the URL?
+ * Unknown / empty list → trust the caller. Listed → use it verbatim, or the
+ * closest alias the host serves, otherwise the host's own default (the first
+ * entry) — which is exactly what the anonymous host would silently use anyway,
+ * only now the name we display matches the pixels we get back.
+ */
+export function negotiatePollinationsImageModel(requested: string, available: string[]): string {
+  const want = (requested || POLLINATIONS_FREE_IMAGE_MODEL).trim() || POLLINATIONS_FREE_IMAGE_MODEL;
+  if (!available.length) return want;
+  if (available.includes(want)) return want;
+  const tail = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want;
+  const byTail = available.find((m) => m === tail || m.endsWith(`/${tail}`) || m.includes(want));
+  if (byTail) return byTail;
+  if (FLUX_MODEL_ALIASES.includes(want)) {
+    const anyFlux = available.find((m) => FLUX_MODEL_ALIASES.includes(m) || /flux/i.test(m));
+    if (anyFlux) return anyFlux;
+  }
+  return available[0];
+}
+
+let modelsCache: { at: number; list: string[] } | null = null;
+let modelsInflight: Promise<string[]> | null = null;
+
+/** Cached read of the free tier's live model list; resolves [] when offline. */
+export async function fetchPollinationsFreeImageModels(ttlMs = 300000): Promise<string[]> {
+  if (modelsCache && Date.now() - modelsCache.at < ttlMs) return modelsCache.list;
+  if (!modelsInflight) {
+    modelsInflight = (async (): Promise<string[]> => {
+      let list: string[] = [];
+      try {
+        const res = await fetchWithTimeout(POLLINATIONS_IMAGE_MODELS_URL, { headers: { Accept: 'application/json' } }, 10000);
+        if (res.ok) list = parsePollinationsModelList(await res.json());
+      } catch {
+        list = [];
+      }
+      modelsCache = { at: Date.now(), list };
+      return list;
+    })().finally(() => {
+      modelsInflight = null;
+    });
+  }
+  return modelsInflight;
+}
+
+/** Test-only: forget the cached model list. */
+export function resetPollinationsModelCache(): void {
+  modelsCache = null;
+  modelsInflight = null;
+}
+
 
 /** Turns a plain idea ("rusty metal") into a texture-friendly prompt. */
 export function texturePrompt(prompt: string, seamless: boolean): string {
@@ -60,11 +188,16 @@ export function texturePrompt(prompt: string, seamless: boolean): string {
   return `${base}${suffix}`;
 }
 
-async function downloadImage(url: string, timeoutMs: number, signal?: AbortSignal): Promise<Blob> {
-  const res = await fetchWithTimeout(url, { signal, headers: { Accept: 'image/*' } }, timeoutMs);
+async function downloadImage(
+  url: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  headers?: Record<string, string>,
+): Promise<Blob> {
+  const res = await fetchWithTimeout(url, { signal, headers: { Accept: 'image/*', ...(headers ?? {}) } }, timeoutMs);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Pollinations returned HTTP ${res.status}${text ? `: ${text.slice(0, 160)}` : ''}`);
+    throw new Error(pollinationsImageError(res.status, hostOf(url), text));
   }
   const blob = await res.blob();
   if (!blob.type.startsWith('image/') && blob.size < 1024) {
@@ -73,9 +206,38 @@ async function downloadImage(url: string, timeoutMs: number, signal?: AbortSigna
   return blob;
 }
 
+/**
+ * Actionable image-tier errors. `body` is the truncated response text: the
+ * legacy host echoes the request it really ran (`requestParameters`), which is
+ * often the only way to learn it swapped your model or clamped your size.
+ */
+export function pollinationsImageError(status: number, host: string, body = ''): string {
+  const detail = body.trim() ? ` — ${body.trim().slice(0, 180)}` : '';
+  if (status === 401 || status === 403) {
+    return (
+      `${host} needs an API key for that request (HTTP ${status}). The free image tier stays keyless on ` +
+      'image.pollinations.ai; keys for the full model list (real FLUX, GPT-Image…) are free at ' +
+      'enter.pollinations.ai/keys → ✨ AI → Setup → Pollinations key.'
+    );
+  }
+  if (status === 402) {
+    return `${host} asked for payment (HTTP 402) — the Pollinations key in ✨ AI → Setup is out of Pollen credits. Top up at enter.pollinations.ai, or remove the key to fall back to the free tier.`;
+  }
+  if (status === 429) {
+    return `${host} throttled the free tier (HTTP 429): anonymous access is ≈1 image / 15s. Wait a few seconds and retry, or add a free key for the higher limits.`;
+  }
+  if (status >= 500) {
+    return (
+      `${host} could not render that image (HTTP ${status})${detail}. The free tier answers 5xx when a ` +
+      'prompt or size is unsupported — retry once, try a smaller square size, or change the model in ✨ AI → Setup.'
+    );
+  }
+  return `${host} returned HTTP ${status}${detail}.`;
+}
+
 export class PollinationsImageProvider implements ImageProvider {
   id = 'pollinations';
-  label = 'Pollinations Flux (free, no key)';
+  label = 'Pollinations image tier (free, no key)';
   free = true;
   private apiKey?: string;
 
@@ -83,27 +245,88 @@ export class PollinationsImageProvider implements ImageProvider {
     if (apiKey?.trim()) this.apiKey = apiKey.trim();
   }
 
+  /**
+   * Free path: legacy anonymous host, named model chosen from its live list so
+   * the reported model matches the pixels (it silently substitutes otherwise).
+   * Keyed path: unified API first (real FLUX), anonymous free tier on failure.
+   */
   async generateImage(prompt: string, opts: ImageGenOptions = {}): Promise<ImageGenResult> {
     const clean = prompt.trim().slice(0, 2000);
     if (!clean) throw new Error('Describe the image first.');
     const width = clampInt(opts.width ?? 512, 64, 2048);
     const height = clampInt(opts.height ?? 512, 64, 2048);
     const seed = opts.seed ?? randomSeed();
-    const model = (opts.model || POLLINATIONS_FREE_IMAGE_MODEL).trim() || POLLINATIONS_FREE_IMAGE_MODEL;
+    const requested = (opts.model || POLLINATIONS_FREE_IMAGE_MODEL).trim() || POLLINATIONS_FREE_IMAGE_MODEL;
     const referrer = typeof location !== 'undefined' ? location.host : 'web-3d-studio';
-    const url = buildPollinationsImageUrl(clean, { width, height, model, seed, referrer, key: this.apiKey });
-    const blob = await downloadImage(url, 120000, opts.signal);
-    return { blob, mime: blob.type || 'image/jpeg', width, height, seed, provider: this.id, prompt: clean };
+
+    let keyError = '';
+    if (this.apiKey) {
+      try {
+        const url = buildPollinationsGenImageUrl(clean, { width, height, model: requested, seed });
+        const blob = await downloadImage(url, 120000, opts.signal, { Authorization: `Bearer ${this.apiKey as string}` });
+        return {
+          blob,
+          mime: blob.type || 'image/jpeg',
+          width,
+          height,
+          seed,
+          provider: this.id,
+          prompt: clean,
+          model: requested,
+          tier: 'keyed',
+        };
+      } catch (e) {
+        const err = e as Error;
+        if (opts.signal?.aborted || err?.name === 'AbortError') throw err;
+        keyError = err?.message ?? String(err);
+      }
+    }
+
+    const explicit = Boolean((opts.model ?? '').trim());
+    const models = explicit ? [] : await fetchPollinationsFreeImageModels();
+    const model = explicit ? requested : negotiatePollinationsImageModel(requested, models);
+    const url = buildPollinationsImageUrl(clean, { width, height, model, seed, referrer });
+    try {
+      const blob = await downloadImage(url, 120000, opts.signal);
+      return {
+        blob,
+        mime: blob.type || 'image/jpeg',
+        width,
+        height,
+        seed,
+        provider: this.id,
+        prompt: clean,
+        model,
+        tier: 'anonymous',
+        warning: keyError || undefined,
+      };
+    } catch (e) {
+      const err = e as Error;
+      if (opts.signal?.aborted || err?.name === 'AbortError') throw err;
+      throw new Error(keyError ? `${keyError} (free tier fallback also failed: ${err.message})` : err.message);
+    }
   }
 
   async test(): Promise<string> {
     const started = Date.now();
-    const url = buildPollinationsImageUrl('test swatch, flat color', { width: 64, height: 64 });
+    const referrer = typeof location !== 'undefined' ? location.host : 'web-3d-studio';
+    const url = buildPollinationsImageUrl('test swatch, flat color', { width: 64, height: 64, referrer });
     const res = await fetchWithTimeout(url, { method: 'GET', headers: { Accept: 'image/*', Range: 'bytes=0-0' } }, 45000);
-    if (!res.ok) throw new Error(`HTTP ${res.status} — the free tier may be throttled, try again shortly.`);
-    return `Pollinations reachable in ${Date.now() - started}ms (free image tier OK).`;
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(pollinationsImageError(res.status, hostOf(url), text));
+    }
+    const model = negotiatePollinationsImageModel(POLLINATIONS_FREE_IMAGE_MODEL, await fetchPollinationsFreeImageModels());
+    const fluxish = /flux/i.test(model);
+    return (
+      `Pollinations reachable in ${Date.now() - started}ms (free image tier OK, model: ${model}).` +
+      (fluxish || this.apiKey
+        ? ''
+        : ' The anonymous tier no longer serves FLUX — add a free key in ✨ AI → Setup for black-forest-labs models.')
+    );
   }
 }
+
 
 /** Flatten a conversation for the plain-text GET endpoints (cap ±4k chars). */
 export function flattenMessages(messages: AgentMessage[]): string {

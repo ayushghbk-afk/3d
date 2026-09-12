@@ -1,8 +1,14 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   PollinationsChatProvider,
+  PollinationsImageProvider,
+  buildPollinationsGenImageUrl,
   buildPollinationsImageUrl,
   flattenMessages,
+  negotiatePollinationsImageModel,
+  parsePollinationsModelList,
+  pollinationsImageError,
+  resetPollinationsModelCache,
   texturePrompt,
   unreachableChatError,
 } from '../../src/ai/pollinations.js';
@@ -33,6 +39,117 @@ describe('pollinations URL builder', () => {
     expect(url).toContain('model=turbo');
     expect(url).toContain('nologo=false');
     expect(url).toContain('referrer=app.test');
+  });
+});
+
+describe('pollinations free-tier model negotiation', () => {
+  afterEach(() => resetPollinationsModelCache());
+
+  it('parses the flat list and the catalog shape', () => {
+    expect(parsePollinationsModelList(['sana', ' flux '])).toEqual(['sana', 'flux']);
+    expect(parsePollinationsModelList({ data: [{ id: 'openai/gpt-5', aliases: ['openai'] }] })).toEqual([
+      'openai/gpt-5',
+      'openai',
+    ]);
+    expect(parsePollinationsModelList('<html>rate limited</html>')).toEqual([]);
+  });
+
+  it('keeps a served model and names the host substitute instead of lying', () => {
+    expect(negotiatePollinationsImageModel('flux', [])).toBe('flux');
+    expect(negotiatePollinationsImageModel('flux', ['flux', 'sana'])).toBe('flux');
+    // live on 2026-09-12: the anonymous host only lists `sana` and quietly maps
+    // flux onto it, so `sana` is what we must report and send.
+    expect(negotiatePollinationsImageModel('flux', ['sana'])).toBe('sana');
+    expect(negotiatePollinationsImageModel('flux', ['black-forest-labs/flux.1-schnell'])).toBe(
+      'black-forest-labs/flux.1-schnell',
+    );
+    expect(negotiatePollinationsImageModel('zimage', ['sana', 'zimage'])).toBe('zimage');
+  });
+
+  it('sends the negotiated model, no dead `enhance` param, and reports it back', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/models')) {
+          return Response.json(['sana']);
+        }
+        return new Response('fake', { status: 200, headers: { 'content-type': 'image/jpeg' } });
+      }),
+    );
+    const out = await new PollinationsImageProvider().generateImage('rusty metal plate');
+    expect(urls[0]).toContain('https://image.pollinations.ai/models');
+    expect(urls[1]).toContain('model=sana');
+    expect(urls[1]).toContain('nologo=true');
+    expect(urls[1]).not.toContain('enhance');
+    expect(out.model).toBe('sana');
+    expect(out.tier).toBe('anonymous');
+  });
+
+  it('honours an explicit model without probing the free list', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        urls.push(String(input));
+        return new Response('fake', { status: 200, headers: { 'content-type': 'image/jpeg' } });
+      }),
+    );
+    const out = await new PollinationsImageProvider().generateImage('mossy brick', { model: 'sana' });
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain('model=sana');
+    expect(out.model).toBe('sana');
+  });
+
+  it('routes a key to the unified API in a header, never in the URL', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('fake', { status: 200, headers: { 'content-type': 'image/jpeg' } })),
+    );
+    const out = await new PollinationsImageProvider('sk_secret').generateImage('brushed aluminium', {
+      width: 512,
+      height: 512,
+      model: 'flux',
+    });
+    expect(out.tier).toBe('keyed');
+    expect(out.model).toBe('flux');
+  });
+
+  it('builds the keyed URL without leaking the key and falls back when it is rejected', async () => {
+    const url = buildPollinationsGenImageUrl('a cube', { width: 256, height: 256, model: 'flux', key: 'sk_nope' });
+    expect(url).toContain('https://gen.pollinations.ai/image/a%20cube');
+    expect(url).toContain('model=flux');
+    expect(url).not.toContain('sk_nope');
+
+    const calls: { url: string; headers?: Record<string, string> }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: { headers?: Record<string, string> }) => {
+        const u = String(input);
+        calls.push({ url: u, headers: init?.headers });
+        if (u.includes('gen.pollinations.ai')) return new Response('nope', { status: 401 });
+        if (u.endsWith('/models')) return Response.json(['sana']);
+        return new Response('fake', { status: 200, headers: { 'content-type': 'image/jpeg' } });
+      }),
+    );
+    const out = await new PollinationsImageProvider('sk_bad').generateImage('scuffed paint');
+    expect(calls[0].headers?.Authorization).toBe('Bearer sk_bad');
+    expect(out.model).toBe('sana');
+    expect(out.tier).toBe('anonymous');
+    // the image is usable but the setup is broken — say so instead of hiding it
+    expect(out.warning).toContain('401');
+    expect(calls.every((c) => !c.url.includes('sk_bad'))).toBe(true);
+  });
+
+  it('turns free-tier failures into instructions', () => {
+    expect(pollinationsImageError(429, 'image.pollinations.ai')).toContain('1 image / 15s');
+    expect(pollinationsImageError(401, 'gen.pollinations.ai')).toContain('enter.pollinations.ai/keys');
+    expect(pollinationsImageError(402, 'gen.pollinations.ai')).toContain('Pollen credits');
+    expect(pollinationsImageError(500, 'image.pollinations.ai', '{"message":"image is too large"}')).toContain(
+      'image is too large',
+    );
   });
 });
 

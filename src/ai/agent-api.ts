@@ -22,7 +22,7 @@ import { analyzeScene, planPaint, planTidy } from './scene-iq.js';
 import { answerLocally } from './local-answer.js';
 import { aiSettings, logActivity, verifyAgentToken } from './settings.js';
 import { chatSmart, generateImageSmart, generateMeshSmart } from './factory.js';
-import { texturePrompt } from './pollinations.js';
+import { fetchPollinationsFreeImageModels, POLLINATIONS_FREE_IMAGE_MODEL, texturePrompt } from './pollinations.js';
 import { blobToDataUrl } from './providers.js';
 import type { AgentScope, AgentSessionLike, AgentTokenMeta, AgentTransport } from './types.js';
 
@@ -930,6 +930,9 @@ export class AgentAPI {
     const { result, fallback } = await generateImageSmart(prompt, {
       width, height,
       seed: p.seed === undefined ? undefined : num(p, 'seed', true, 0, 999999999),
+      // Optional model id. The free Pollinations tier silently substitutes ids
+      // it does not serve, so `model` in the reply is what actually ran.
+      model: optStr(p, 'model', 60),
       strict: bool(p, 'strict'),
     });
     return {
@@ -939,6 +942,9 @@ export class AgentAPI {
       height: result.height,
       seed: result.seed,
       provider: result.provider,
+      model: result.model ?? null,
+      tier: result.tier ?? null,
+      warning: result.warning ?? null,
       fallback,
     };
   }
@@ -967,7 +973,7 @@ export class AgentAPI {
       if (objectId) t.session.assignMaterial(objectId, matId as string);
       return {
         mode: t.mode, materialId: matId, seed: result.seed, objectId: objectId ?? null,
-        provider: result.provider, fallback,
+        provider: result.provider, model: result.model ?? null, fallback,
         thumb: t.doc.materials.find((m) => m.id === matId)?.mapAssetId
           ? (t.doc.assets.find((a) => a.id === t.doc.materials.find((m) => m.id === matId)?.mapAssetId)?.thumb ?? null)
           : null,
@@ -996,7 +1002,10 @@ export class AgentAPI {
     }
     touchDoc(t.doc);
     await this.persist(t, 'material');
-    return { mode: t.mode, materialId: matId, seed: result.seed, objectId: objectId ?? null, provider: result.provider, fallback };
+    return {
+      mode: t.mode, materialId: matId, seed: result.seed, objectId: objectId ?? null,
+      provider: result.provider, model: result.model ?? null, fallback,
+    };
   }
 
   private async m_model_generate(p: Params): Promise<unknown> {
@@ -1069,6 +1078,11 @@ export class AgentAPI {
       version: AGENT_API_VERSION,
       api: 'textures',
       provider: s.imageProvider,
+      defaultModel: POLLINATIONS_FREE_IMAGE_MODEL,
+      // Live free-tier model list (cached; [] when offline). Anything not listed
+      // is silently replaced by the host, so prefer an id from this list.
+      freeTierModels: s.imageProvider === 'custom' ? [] : await fetchPollinationsFreeImageModels(),
+      note: 'Free anonymous tier serves ~1 image / 15s and drops FLUX unless a Pollinations key is set.',
       methods: [
         { name: 'texture.capabilities', scope: 'none', summary: 'Texture API health + provider.' },
         { name: 'texture.list', scope: 'read', summary: 'List texture assets in a project.' },
@@ -1445,7 +1459,7 @@ const METHOD_DOCS: Record<AgentMethod, string> = {
   'history.redo': 'Redo (open editor only).',
   'save.now': 'Save now (local + cloud when signed in). Params: {projectId?}.',
   'ai.ask': 'Ask the assistant about the project. Params: {projectId?, question}. Factual scene questions fall back to an offline answer (offline:true) when the cloud AI is unreachable.',
-  'image.generate': 'Text → image data URL (free Flux by default). Params: {prompt, width?, height?, seed?, strict?}.',
+  'image.generate': 'Text → image data URL (free Pollinations tier; flux when the key allows it). Params: {prompt, width?, height?, seed?, model?, strict?}.',
   'texture.generate': 'Text → texture applied to a material (and optionally an object). Params: {projectId?, prompt, materialId?, objectId?, size?, seamless?, strict?}. Also window.Web3DStudio.textures.generate.',
   'texture.list': 'List texture assets + materials. Params: {projectId?}.',
   'texture.apply': 'Assign an existing texture asset to a material/object. Params: {projectId?, assetId, materialId?, objectId?}.',

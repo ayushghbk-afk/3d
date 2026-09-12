@@ -18,8 +18,15 @@ undo/redo, viewport updates and realtime sync.
 - **Free 3D generator:** Stable Fast 3D (Stability AI, game-ready meshes with
   UVs + textures) via the public Hugging Face Space — text → image → GLB →
   scene. No signup, no key. TripoSR is the automatic fallback if SF3D is busy.
-- **Free texture generator:** Pollinations Flux — text → texture → material map.
-  No signup, no key (~1 image / 15s on the anonymous tier).
+- **Free texture generator:** Pollinations — text → texture → material map. No
+  signup, no key (≈1 image / 15s on the anonymous tier). Caveat verified live on
+  2026-09-12: the keyless host `image.pollinations.ai/prompt/…` lists only
+  `["sana"]` and silently substitutes any model id it does not serve, so
+  `texture.generate` reports the `model` that actually produced the image. Real
+  FLUX (Black Forest Labs) is only on the keyed unified API
+  `gen.pollinations.ai/image/…` (401 without a key, Pollen credits); paste a key
+  in ✨ AI → Setup → **Pollinations key** and images route there automatically,
+  falling back to the free tier when the key is rejected or out of budget.
 - **Free assistant:** Groq Llama (`llama-3.3-70b-versatile`) via
   `https://groq-proxy.mr-hackerdon808.workers.dev/` — no browser key. Ask and
   `ai.ask` use it first, then Pollinations, then offline scene answers.
@@ -234,7 +241,10 @@ Each slot is independent — mix free defaults with your own endpoints:
   (`http://localhost:1234/v1`), vLLM, … Before going custom, try the
   **Pollinations key** field (free at enter.pollinations.ai/keys) — it keeps
   the free assistant but routes it through the current keyed API, which
-  survives anonymous-tier blocks and throttling.
+  survives anonymous-tier blocks and throttling, and it upgrades textures to
+  FLUX on `gen.pollinations.ai`. Use an **app key (`pk_`)**: the key is sent from
+  the visitor's browser, so a secret key (`sk_`) would be exposed to them (and
+  app keys carry their own budget + model allowlist).
 - **Textures & images**: OpenAI-compatible `POST {baseUrl}/images/generations`
   (`b64_json` preferred, `url` accepted).
 - **3D models**: `POST {endpointUrl}` with `{model, prompt, format:"glb"}`;
@@ -275,6 +285,8 @@ unless `strict` is set.
 | Relay `TIMEOUT` | App tab open? Relay connected (green)? Long generations need bigger `timeoutMs`. |
 | Free 3D stuck on “waking…” | The HF Space sleeps when idle; first boot takes 1–3 min. Retry, or add a free `hf_…` token / use offline/custom 3D. |
 | Free texture 429 / slow | Anonymous Pollinations ≈ 1 req / 15s — wait and retry. |
+| Free texture looks unlike "FLUX" output | Expected on the keyless tier: unknown model ids are mapped to its default (`sana`). `texture.capabilities` → `freeTierModels` lists what is really served; add a Pollinations key for `black-forest-labs/flux.*`. |
+| Texture fails with "HTTP 500 … too large for the JPEG format" | The free host clamps odd sizes; pass a square size (256–1024) and retry — one request per ~15s. |
 | Ask / `ai.ask` “Couldn't reach the Groq assistant” | The Groq proxy at groq-proxy.mr-hackerdon808.workers.dev is down or blocked. Retry, switch to Pollinations in ✨ AI → Setup, or point Ask at a custom endpoint. Counts/lists/summaries still answer offline. |
 | Ask / `ai.ask` “ended anonymous access (402)” | Pollinations (fallback) now requires a key for text: get a free one at enter.pollinations.ai/keys → ✨ AI → Setup → Pollinations key → Save → Test. |
 | Custom API CORS errors | The endpoint must allow browser calls (`Access-Control-Allow-Origin`). Local Ollama/LM Studio work; some clouds need a proxy. |
