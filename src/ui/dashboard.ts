@@ -8,6 +8,7 @@ import { toast } from './toast.js';
 import { nav } from './router.js';
 import { SyncEngine } from '../editor/sync.js';
 import { openModal, closeModal } from './modals.js';
+import { openCloudDiagnosticsModal } from './panels-extra.js';
 
 interface CardProject {
   id: string;
@@ -195,7 +196,7 @@ export function mountDashboard(root: HTMLElement): () => void {
       const pendingTotal = cards.reduce((a, c) => a + c.pending, 0);
       const warning = cloudFailure || cloudConfigError || auth.error.get();
       banner.innerHTML = warning
-        ? `<div class="banner banner-warn">${escapeHtml(warning)} <button class="btn btn-sm" id="retry-cloud">Retry</button></div>`
+        ? `<div class="banner banner-warn">${escapeHtml(warning)} <button class="btn btn-sm" id="retry-cloud">Retry</button> <button class="btn btn-sm" id="diag-cloud">Diagnose</button></div>`
         : !cloudEnabled
           ? `<div class="banner banner-info">Local mode — projects save on this device. Add Supabase public configuration (see README) for cloud sync & teams.</div>`
           : !u || u.guest
@@ -205,6 +206,8 @@ export function mountDashboard(root: HTMLElement): () => void {
               : '';
       const retryBtn = banner.querySelector('#retry-cloud') as HTMLButtonElement | null;
       if (retryBtn) retryBtn.onclick = () => void load();
+      const diagBtn = banner.querySelector('#diag-cloud') as HTMLButtonElement | null;
+      if (diagBtn) diagBtn.onclick = () => openCloudDiagnosticsModal();
       if (cloudFailure) {
         badge.textContent = '⚠ Cloud unavailable';
         badge.className = 'badge badge-warn';
@@ -497,10 +500,14 @@ export function mountLogin(root: HTMLElement): () => void {
       <div class="auth-card">
         <div class="brand"><span class="brand-cube" aria-hidden="true"></span> Web 3D Studio</div>
         <div id="auth-forms"></div>
-        <button id="back-btn" class="btn btn-ghost">← Back</button>
+        <div class="prop-actions">
+          <button id="diag-btn" class="btn btn-ghost btn-sm" title="Probe the Supabase project: tables, storage buckets, invite RPC, Realtime">☁ Cloud diagnostics</button>
+          <button id="back-btn" class="btn btn-ghost">← Back</button>
+        </div>
       </div>
     </div>`;
   (root.querySelector('#back-btn') as HTMLButtonElement).onclick = () => nav('#/');
+  (root.querySelector('#diag-btn') as HTMLButtonElement).onclick = () => openCloudDiagnosticsModal();
   const forms = root.querySelector('#auth-forms') as HTMLElement;
 
   if (!cloudEnabled) {

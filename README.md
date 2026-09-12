@@ -156,16 +156,24 @@ For a **fresh** Supabase project, run [`supabase/setup.sql`](supabase/setup.sql)
 in the SQL editor. For an existing installation, apply only the missing files
 in `supabase/migrations/`, in filename order. The repair migrations include
 `20260908000003_cloud_repairs.sql`,
-`20260908000004_scene_project_integrity.sql` and
+`20260908000004_scene_project_integrity.sql`,
 `20260911000000_invite_join_repair.sql` (fixes invite links failing with
-"Project not found" on installations missing the `join_project` RPC); none of
-them delete user data.
+"Project not found" on installations missing the `join_project` RPC) and
+`20260912000000_storage_buckets_repair.sql` (fixes a `✕ Error` save badge whose
+diagnostics read `NoSuchBucket — Bucket not found` on installations missing the
+`assets` / `thumbnails` buckets); none of them delete user data.
 See the deployment guide for legacy-integrity validation before declaring an
 existing database clean.
 
 Enable Email auth and allow `https://ayushghbk-afk.github.io/3d/` as both the
 Site URL and an allowed Redirect URL. Full instructions and troubleshooting are
 in [the deployment guide](docs/DEPLOYMENT.md).
+
+**Cloud not saving?** Click the save badge in the editor's top bar (or ⌘K →
+*Cloud Diagnostics*) to run the built-in probe. It tests reachability, the
+session, all 15 tables, the `join_project` RPC, both storage buckets, a real
+upload round-trip and Realtime, then tells you the single thing to fix — and
+**Copy report** gives you a paste-ready summary that never includes the API key.
 
 Database access is protected by Row Level Security. Uploaded assets use a
 private bucket; thumbnails are public. Collaboration uses private, authorized

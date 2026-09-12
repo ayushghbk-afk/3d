@@ -207,15 +207,25 @@ export class SyncEngine {
       }
 
       // Mark the cloud revision only AFTER every durable write has succeeded.
+      // A thumbnail is cosmetic: a Storage failure here (missing `thumbnails`
+      // bucket, a policy change, an oversized blob) used to throw out of the
+      // whole push, so the scene rows written above were left behind while
+      // projects.version never advanced and the badge read "✕ Error" forever.
+      // Store what we can, keep the previous thumbnail_url, and keep saving.
       let thumbnailUrl: string | undefined;
       if (doc.thumbnail) {
-        const response = await fetch(doc.thumbnail);
-        if (!response.ok) throw new Error('Could not read the project thumbnail.');
-        const blob = await response.blob();
-        const path = `${doc.id}/thumb.jpg`;
-        const { error } = await sb.storage.from('thumbnails').upload(path, blob, { upsert: true, contentType: 'image/jpeg' });
-        if (error) throw error;
-        thumbnailUrl = sb.storage.from('thumbnails').getPublicUrl(path).data.publicUrl;
+        try {
+          const response = await fetch(doc.thumbnail);
+          if (!response.ok) throw new Error('Could not read the project thumbnail.');
+          const blob = await response.blob();
+          const path = `${doc.id}/thumb.jpg`;
+          const { error } = await sb.storage.from('thumbnails').upload(path, blob, { upsert: true, contentType: 'image/jpeg' });
+          if (error) throw error;
+          thumbnailUrl = sb.storage.from('thumbnails').getPublicUrl(path).data.publicUrl;
+        } catch (e) {
+          console.warn('thumbnail upload skipped', e);
+          this.session.notice('warn', `Saved without a thumbnail: ${cloudErrorMessage(e)}`);
+        }
       }
       // Compare-and-swap on the cloud head revision we last observed. Without
       // this, a whole-doc push from device A silently overwrote a peer's

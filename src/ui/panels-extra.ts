@@ -1,5 +1,6 @@
 import type { EditorSession } from '../editor/session.js';
 import { cloudEnabled } from '../lib/supabase.js';
+import { runCloudDiagnostics, reportToText, type CloudReport } from '../lib/cloud-diagnostics.js';
 import { toast } from './toast.js';
 import { openModal, closeModal } from './modals.js';
 import { escapeHtml } from '../lib/utils.js';
@@ -112,4 +113,82 @@ export function openShareModal(s: EditorSession): void {
       toast(aiUrl, 'info');
     }
   };
+}
+
+const STATUS_ICON: Record<string, string> = { ok: '✓', warn: '⚠', fail: '✕', skip: '·' };
+
+/**
+ * Cloud health report. Opened from the save badge, the Project card and the
+ * command palette — the three places a "✕ Error" badge appears with no
+ * explanation behind it.
+ */
+export function openCloudDiagnosticsModal(s?: EditorSession): void {
+  const body = document.createElement('div');
+  body.className = 'diag';
+  const projectId = s?.doc.id ?? null;
+
+  const paint = (report: CloudReport | null, running: boolean): void => {
+    if (!report) {
+      body.innerHTML = `<p class="muted">${running ? 'Probing Supabase… this takes a few seconds.' : 'No report yet.'}</p>`;
+      return;
+    }
+    body.innerHTML = `
+      ${report.advice ? `<div class="banner ${report.failed ? 'banner-warn' : 'banner-info'}">${escapeHtml(report.advice)}</div>` : ''}
+      <div class="diag-rows">
+        ${report.checks
+          .map(
+            (c) => `<div class="diag-row diag-${c.status}">
+              <span class="diag-icon">${STATUS_ICON[c.status] ?? '?'}</span>
+              <span class="diag-main">
+                <strong>${escapeHtml(c.label)}</strong>
+                <span class="muted small">${escapeHtml(c.detail)}</span>
+                ${c.raw ? `<code class="diag-raw">${escapeHtml(c.raw)}</code>` : ''}
+              </span>
+              <span class="muted small diag-ms">${c.ms ? `${c.ms} ms` : ''}</span>
+            </div>`,
+          )
+          .join('')}
+      </div>
+      <p class="muted small">Ran ${escapeHtml(new Date(report.at).toLocaleTimeString())} against ${escapeHtml(
+        report.url || 'no configured project',
+      )}. Last save error: ${escapeHtml(s?.syncError.get() ?? 'none')}</p>`;
+  };
+
+  let running = false;
+  const run = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    paint(null, true);
+    try {
+      paint(await runCloudDiagnostics({ projectId }), false);
+    } catch (e) {
+      body.innerHTML = `<p class="error">Diagnostics failed: ${escapeHtml((e as Error).message ?? String(e))}</p>`;
+    } finally {
+      running = false;
+    }
+  };
+
+  openModal({
+    title: 'Cloud diagnostics',
+    body,
+    wide: true,
+    actions: [
+      { label: 'Close', kind: 'ghost' },
+      {
+        label: 'Copy report',
+        keepOpen: true,
+        onClick: async () => {
+          const report = await runCloudDiagnostics({ projectId });
+          try {
+            await navigator.clipboard.writeText(reportToText(report));
+            toast('Report copied — paste it where you are asking for help', 'success');
+          } catch {
+            toast('Clipboard blocked — see the panel to read it', 'warn');
+          }
+        },
+      },
+      { label: 'Run again', kind: 'primary', keepOpen: true, onClick: () => void run() },
+    ],
+  });
+  void run();
 }

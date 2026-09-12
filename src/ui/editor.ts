@@ -15,7 +15,7 @@ import { attachAutoHideChrome, type AutoHideChrome } from './chrome.js';
 import {
   openGithubImport, openGithubExport, openMembersModal, openVersionsModal, openShortcutsModal,
 } from './panels.js';
-import { openExportModal, openShareModal } from './panels-extra.js';
+import { openExportModal, openShareModal, openCloudDiagnosticsModal } from './panels-extra.js';
 import { setEditorSession } from '../ai/index.js';
 import { openCommandPalette, isPaletteOpen, closeCommandPalette } from './command-palette.js';
 import { setCommandHost, runCommand, type PanelName as CommandPanelName } from './commands.js';
@@ -328,8 +328,11 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
       }
     };
 
-    // save state
-    unsubs.push(s.syncError.subscribe((error) => { saveEl.title = error ?? 'Project save status'; }));
+    // save state — the badge is also the door into the cloud report: "✕ Error"
+    // on its own told nobody what was actually broken.
+    unsubs.push(s.syncError.subscribe((error) => { saveEl.title = `${error ?? 'Project save status'} — click for cloud diagnostics`; }));
+    saveEl.style.cursor = 'pointer';
+    saveEl.onclick = () => void openCloudDiagnosticsModal(s);
     unsubs.push(
       s.saveState.subscribe((st) => {
         const map = { saved: '✓ Saved', saving: '… Saving', local: '💾 Local', offline: '⚠ Offline', error: '✕ Error' } as const;
