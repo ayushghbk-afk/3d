@@ -235,6 +235,9 @@ export class EditorSession implements ScriptHost {
       doc = await localDb.getProject(projectId);
       if (!doc && cloudEnabled && u && !u.guest) {
         doc = await SyncEngine.pullStandalone(projectId);
+        // Cache the cloud copy (e.g. right after joining via invite link) so
+        // later offline opens and sync retries have a local fallback.
+        if (doc) await localDb.saveProject(doc);
       }
       if (!doc) throw new Error('Project not found');
     } else {

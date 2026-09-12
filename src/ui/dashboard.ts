@@ -417,14 +417,78 @@ export async function handleJoinRoute(projectId: string, code: string): Promise<
     return;
   }
   if (!auth.user.get() || auth.user.get()?.guest) {
+    rememberInvite(projectId, code);
     nav('#/login');
-    toast('Sign in first, then open the invite link again', 'warn');
+    toast('Sign in first — your invite will open automatically afterwards', 'info');
     return;
   }
+  clearPendingInvite();
   const err = await SyncEngine.joinWithCode(projectId, code);
   if (err) toast(`Join failed: ${err}`, 'error');
   else toast('Joined project', 'success');
   nav(err ? '#/' : `#/p/${projectId}`);
+}
+
+// ---------- invite resume across sign-in ----------
+const PENDING_INVITE_KEY = 'w3ds.pendingInvite';
+
+interface PendingInvite {
+  projectId: string;
+  code: string;
+}
+
+function rememberInvite(projectId: string, code: string): void {
+  try {
+    sessionStorage.setItem(PENDING_INVITE_KEY, JSON.stringify({ projectId, code } satisfies PendingInvite));
+  } catch {
+    /* private mode: the user can reopen the link manually */
+  }
+}
+
+function readPendingInvite(): PendingInvite | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_INVITE_KEY);
+    if (!raw) return null;
+    const { projectId, code } = JSON.parse(raw) as Partial<PendingInvite>;
+    if (!projectId || !code) return null;
+    return { projectId, code };
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingInvite(): void {
+  try {
+    sessionStorage.removeItem(PENDING_INVITE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Navigate to a stored invite link; returns true when it navigated. */
+function resumePendingInvite(): boolean {
+  const invite = readPendingInvite();
+  if (!invite) return false;
+  clearPendingInvite();
+  nav(`#/join/${invite.projectId}?code=${encodeURIComponent(invite.code)}`);
+  return true;
+}
+
+/**
+ * Resume an invite link that sent the user through sign-in (password or
+ * magic-link email return) instead of losing it on the way to the dashboard.
+ */
+export function resumePendingInviteIfSignedIn(): boolean {
+  const u = auth.user.get();
+  if (!u || u.guest) return false;
+  return resumePendingInvite();
+}
+
+/** Where to go after a successful sign-in on the login page. */
+function navAfterLogin(): void {
+  // The auth.user subscriber may already have navigated (invite resume).
+  if (window.location.hash !== '#/login') return;
+  if (!resumePendingInvite()) nav('#/');
 }
 
 export function mountLogin(root: HTMLElement): () => void {
@@ -496,7 +560,7 @@ export function mountLogin(root: HTMLElement): () => void {
           const error = await auth.signIn(email, pass);
           if (disposed) return;
           if (error) errEl.textContent = error;
-          else nav('#/');
+          else navAfterLogin();
         } else if (tab === 'up') {
           const pass = (tabBody.querySelector('#a-pass') as HTMLInputElement).value;
           const name = (tabBody.querySelector('#a-name') as HTMLInputElement).value.trim() || email.split('@')[0];
@@ -505,7 +569,7 @@ export function mountLogin(root: HTMLElement): () => void {
           if (result.error) errEl.textContent = result.error;
           else if (result.needsEmailConfirmation) {
             infoEl.textContent = 'Check your email to confirm your account, then sign in. Check spam too if the email does not arrive.';
-          } else nav('#/');
+          } else navAfterLogin();
         } else {
           const error = await auth.signInMagic(email);
           if (disposed) return;
@@ -535,7 +599,7 @@ export function mountLogin(root: HTMLElement): () => void {
   });
   render();
   const unsub = auth.user.subscribe((u) => {
-    if (u && !u.guest) nav('#/');
+    if (u && !u.guest) navAfterLogin();
   });
   return () => {
     disposed = true;

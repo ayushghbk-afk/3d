@@ -2,8 +2,10 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/pages',
-  fullyParallel: true,
-  workers: 2,
+  // Editor boots are heavy (three.js + software WebGL). Parallel boots on the
+  // 2-core CI runner starve the CPU and blow expect timeouts — run serially.
+  fullyParallel: false,
+  workers: 1,
   retries: process.env.CI ? 1 : 0,
   use: {
     baseURL: 'http://127.0.0.1:4174/3d/',
