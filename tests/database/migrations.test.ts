@@ -78,6 +78,32 @@ describe('fresh schema and RLS', () => {
     expect(rows).toHaveLength(15);
     expect(rows.every((row) => row.relrowsecurity)).toBe(true);
   });
+  it('creates both storage buckets with the visibility the app depends on', async () => {
+    // The reported "✕ Error" save badge: tables present, buckets absent, so
+    // every upload returns NoSuchBucket — Bucket not found.
+    const { rows } = await db.query<{ id: string; public: boolean }>('select id, public from storage.buckets order by id');
+    expect(rows).toEqual([
+      { id: 'assets', public: false },
+      { id: 'thumbnails', public: true },
+    ]);
+  });
+
+  it('recreates dropped storage buckets and their policies when the repair is rerun', async () => {
+    await db.exec("delete from storage.objects; delete from storage.buckets where id in ('assets', 'thumbnails');");
+    expect((await db.query('select id from storage.buckets')).rows).toHaveLength(0);
+    await db.exec(await readFile(new URL('20260912000000_storage_buckets_repair.sql', migrations), 'utf8'));
+    const { rows } = await db.query<{ id: string; public: boolean }>('select id, public from storage.buckets order by id');
+    expect(rows).toEqual([
+      { id: 'assets', public: false },
+      { id: 'thumbnails', public: true },
+    ]);
+    // A dashboard-created bucket arrives with no policies; the repair adds them.
+    const { rows: policies } = await db.query<{ n: number }>(
+      "select count(*)::int as n from pg_policies where schemaname = 'storage' and tablename = 'objects'",
+    );
+    expect(policies[0].n).toBe(8);
+  });
+
   it('lets owners create a project, owner membership, scene and profile', async () => {
     await asUser(owner);
     const { rows } = await db.query<{ id: string }>("insert into public.projects(name, owner_id) values ('New', auth.uid()) returning id");

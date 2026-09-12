@@ -68,8 +68,16 @@ Do **not** rerun the initial schema or delete any tables. Apply only the migrati
 3. [`20260908000002_materials_textures.sql`](../supabase/migrations/20260908000002_materials_textures.sql).
 4. [`20260908000003_cloud_repairs.sql`](../supabase/migrations/20260908000003_cloud_repairs.sql) — the new repair, safe to rerun.
 5. [`20260911000000_invite_join_repair.sql`](../supabase/migrations/20260911000000_invite_join_repair.sql) — invite-link repair, safe to rerun.
+6. [`20260912000000_storage_buckets_repair.sql`](../supabase/migrations/20260912000000_storage_buckets_repair.sql) — storage-bucket repair, safe to rerun.
 
 **Invite links fail ("Join failed …" then "Failed to open project: Project not found")?** Run **only number 5** and retry the link. It recreates the `join_project` RPC and the baseline table grants that at least one partially-migrated installation lost; every statement is `create or replace` / `if not exists`, so it cannot delete user data. Verify afterwards (see "Verify the deployed invite contract" below) that the query returns exactly one `join_project` row with `p_project_id uuid, p_code text` returning `void`.
+
+**Save badge reads `✕ Error` and the diagnostics report `✕ Storage upload … NoSuchBucket — Bucket not found`?** Run **only number 6** and reload. This is the state where the tables came from `init.sql` but the `insert into storage.buckets` rows are absent — so every durable push (which uploads a project thumbnail) and every import, mesh rewrite or AI model fails at the Storage step. Number 6 creates `assets` (private) and `thumbnails` (public) and re-declares all eight `storage.objects` policies; it deletes nothing and can be rerun at any time. Confirm with:
+
+```sql
+select id, public from storage.buckets order by id;
+-- expect: assets | false   and   thumbnails | true
+```
 
 If the first three were already installed successfully, run **only number 4**, then number 5. If setup previously failed halfway and you see “relation already exists,” stop and share the exact error/table name; do not drop existing data to force it through.
 

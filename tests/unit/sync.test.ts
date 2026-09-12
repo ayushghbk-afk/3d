@@ -99,6 +99,21 @@ it.each(['PATCH scenes', 'POST scene_objects', 'POST materials', 'POST animation
   expect(session.syncError.get()).toContain('denied access');
 });
 
+it('still saves the scene when the thumbnail upload fails', async () => {
+  // A missing `thumbnails` bucket must not strand the durable writes above it:
+  // the push has to reach the projects CAS so the revision head advances.
+  const notice = vi.fn();
+  (session as unknown as { notice: (kind: string, msg: string) => void }).notice = notice;
+  session.doc.thumbnail = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAA==';
+  failRequest = 'POST thumb.jpg';
+  expect(await engine.pushDoc(session.doc)).toBe(true);
+  expect(session.doc.cloudVersion).toBe(session.doc.version);
+  expect(mocks.enqueue).not.toHaveBeenCalled();
+  expect(calls.some((call) => call.route === 'PATCH projects')).toBe(true);
+  expect(notice).toHaveBeenCalledWith('warn', expect.stringContaining('Saved without a thumbnail'));
+  session.doc.thumbnail = null;
+});
+
 it('advances the revision only after all durable writes succeed', async () => {
   expect(await engine.pushDoc(session.doc)).toBe(true);
   expect(calls[calls.length - 1].route).toBe('PATCH projects');

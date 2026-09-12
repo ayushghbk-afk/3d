@@ -183,6 +183,7 @@ export async function runCloudDiagnostics(opts: DiagnosticsOptions = {}): Promis
 
   // 3. session ---------------------------------------------------------------
   let sessionUserId: string | null = null;
+  let accessToken: string | null = null;
   {
     const { ms, value } = await timed(() => sb.auth.getSession());
     const error = value?.error;
@@ -202,6 +203,7 @@ export async function runCloudDiagnostics(opts: DiagnosticsOptions = {}): Promis
       });
     } else {
       sessionUserId = user.id;
+      accessToken = value?.data?.session?.access_token ?? null;
       push({ id: 'session', label: 'Signed in', status: 'ok', detail: `${user.email ?? user.id}`, ms });
     }
   }
@@ -259,27 +261,48 @@ export async function runCloudDiagnostics(opts: DiagnosticsOptions = {}): Promis
   }
 
   // 6. storage buckets -------------------------------------------------------
+  // Ask the Storage API about the bucket itself. `storage.list()` is NOT a
+  // valid existence probe: on a bucket that does not exist it answers 200 with
+  // an empty array, which is how a missing bucket used to pass this check while
+  // every upload to it returned NoSuchBucket.
   {
     const results: string[] = [];
-    let failed = false;
+    const missing: string[] = [];
     let ms = 0;
     for (const bucket of ['assets', 'thumbnails']) {
-      const r = await timed(async () => await sb.storage.from(bucket).list('', { limit: 1 }));
+      const r = await timed(async () => {
+        const res = await fetch(`${cloudConfig.url}/storage/v1/bucket/${bucket}`, {
+          headers: { apikey: cloudConfig.key, Authorization: `Bearer ${accessToken ?? cloudConfig.key}` },
+        });
+        const text = await res.text();
+        let parsed: ServerError & { id?: string; public?: boolean } = {};
+        try {
+          parsed = JSON.parse(text) as typeof parsed;
+        } catch {
+          parsed = { message: text.slice(0, 200) };
+        }
+        return { status: res.status, body: parsed };
+      });
       ms += r.ms;
-      const err = (r.value as { error?: unknown } | undefined)?.error ?? r.error;
-      if (err) {
-        failed = true;
-        results.push(`${bucket}: ${raw(err)}`);
+      const outcome = r.error ? { status: 0, body: { message: String(r.error) } } : (r.value as { status: number; body: ServerError & { public?: boolean } });
+      if (outcome.status === 200) {
+        results.push(`${bucket}: exists${outcome.body.public ? ' (public)' : ' (private)'}`);
+      } else if (outcome.status === 400) {
+        // Private bucket, caller not authorised — the bucket itself is there.
+        results.push(`${bucket}: exists (not readable by this session)`);
       } else {
-        results.push(`${bucket}: listed ok`);
+        missing.push(bucket);
+        results.push(`${bucket}: ${raw(outcome.body)}`);
       }
     }
     push({
       id: 'storage',
       label: 'Storage buckets',
-      status: failed ? 'fail' : 'ok',
-      detail: failed ? 'A bucket the app uploads to is missing or unreadable.' : 'assets + thumbnails buckets are readable',
-      raw: failed ? results.join(' | ') : undefined,
+      status: missing.length ? 'fail' : 'ok',
+      detail: missing.length
+        ? `Missing bucket(s): ${missing.join(', ')} — nothing can be uploaded until they exist.`
+        : 'assets + thumbnails buckets exist',
+      raw: missing.length ? results.join(' | ') : undefined,
       ms,
     });
   }
@@ -405,10 +428,11 @@ export function adviceFor(checks: CloudCheck[]): string | null {
   if (find('schema')?.status === 'fail' || find('rpc')?.status === 'fail') {
     return 'The database is only partly migrated. Open the Supabase SQL editor and run supabase/setup.sql (fresh project) or the missing files in supabase/migrations in filename order, then retry.';
   }
-  if (find('storage')?.status === 'fail') {
-    return 'The assets/thumbnails storage buckets are missing. Re-run supabase/setup.sql — it inserts both buckets and their policies.';
+  const storageWrite = find('storageWrite');
+  if (find('storage')?.status === 'fail' || /NoSuchBucket|Bucket not found/i.test(storageWrite?.raw ?? '')) {
+    return 'The assets/thumbnails storage buckets do not exist. Run supabase/migrations/20260912000000_storage_buckets_repair.sql in the Supabase SQL editor — it creates both buckets and all eight storage policies, is safe to rerun, and deletes nothing.';
   }
-  if (find('storageWrite')?.status === 'fail') {
+  if (storageWrite?.status === 'fail') {
     return 'Uploads are blocked by a storage policy. Run supabase/migrations/20260908000003_cloud_repairs.sql — it adds the UPDATE policies that upsert uploads need.';
   }
   if (find('session')?.status === 'fail') return 'Sign in again; the stored session is no longer valid.';

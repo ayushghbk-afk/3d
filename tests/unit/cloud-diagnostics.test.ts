@@ -62,14 +62,23 @@ async function router(input: RequestInfo | URL): Promise<Response> {
     return json([]);
   }
 
-  const list = path.match(/\/storage\/v1\/object\/list\/([a-z]+)$/);
-  if (list) {
-    return missingBuckets.includes(list[1])
-      ? json({ statusCode: '404', error: 'Not Found', message: 'Bucket not found' }, 404)
-      : json([]);
+  // What the Storage API really does: the bucket endpoint knows about buckets,
+  // the list endpoint does not — it happily returns [] for one that is missing.
+  const bucket = path.match(/\/storage\/v1\/bucket\/([a-z]+)$/);
+  if (bucket) {
+    return missingBuckets.includes(bucket[1])
+      ? json({ statusCode: '404', error: 'Not Found', message: 'Bucket not found', code: 'NoSuchBucket' }, 404)
+      : json({ id: bucket[1], name: bucket[1], public: bucket[1] === 'thumbnails' });
   }
 
+  const list = path.match(/\/storage\/v1\/object\/list\/([a-z]+)$/);
+  if (list) return json([]);
+
   if (path.includes('/storage/v1/object/')) {
+    const target = path.slice(path.indexOf('/storage/v1/object/') + '/storage/v1/object/'.length).split('/')[0];
+    if (missingBuckets.includes(target)) {
+      return json({ statusCode: '404', error: 'Not Found', message: 'Bucket not found', code: 'NoSuchBucket' }, 404);
+    }
     if (uploadFails) return json({ statusCode: '400', error: 'new row violates row-level security policy', message: uploadFails.message }, 400);
     return json({ Key: path });
   }
@@ -139,19 +148,43 @@ describe('cloud diagnostics', () => {
     expect(report.advice).toContain('supabase/setup.sql');
   });
 
-  it('flags a missing storage bucket', async () => {
+  it('flags a missing storage bucket even though listing it succeeds', async () => {
+    // The regression: storage.list() on a missing bucket answers 200 [], so an
+    // earlier version of this check reported "ok" while every upload failed.
     missingBuckets = ['assets'];
     const report = await run();
     expect(byId(report, 'storage').status).toBe('fail');
+    expect(byId(report, 'storage').detail).toContain('assets');
     expect(byId(report, 'storage').raw).toContain('Bucket not found');
-    expect(report.advice).toContain('storage buckets');
+    expect(byId(report, 'storageWrite').status).toBe('fail');
+    expect(byId(report, 'storageWrite').raw).toContain('NoSuchBucket');
+    expect(report.advice).toContain('20260912000000_storage_buckets_repair.sql');
+  });
+
+  it('treats a private bucket this session cannot read as present', async () => {
+    const original = router;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(typeof input === 'string' ? input : input.url);
+        if (url.pathname.endsWith('/storage/v1/bucket/assets')) {
+          return json({ statusCode: '400', error: 'The user does not have permission' }, 400);
+        }
+        return original(input);
+      }),
+    );
+    const report = await run();
+    expect(byId(report, 'storage').status).toBe('ok');
+    expect(byId(report, 'storage').detail).toContain('buckets exist');
   });
 
   it('flags a blocked upload and points at the repair migration', async () => {
     uploadFails = { code: '42501', message: 'new row violates row-level security policy for storage.objects' };
     const report = await run();
     expect(byId(report, 'storageWrite').status).toBe('fail');
+    // A policy denial must not be reported as the missing-bucket repair.
     expect(report.advice).toContain('20260908000003_cloud_repairs.sql');
+    expect(report.advice).not.toContain('storage_buckets_repair');
   });
 
   it('flags a missing join_project RPC so invite links are explained', async () => {
