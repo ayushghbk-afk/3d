@@ -2,7 +2,7 @@ import type { EditorSession } from '../editor/session.js';
 import type { MaterialPresetId, PrimitiveType } from '../state/models.js';
 import { toast } from './toast.js';
 import { openVersionsModal, openMembersModal, openShortcutsModal } from './panels.js';
-import { openExportModal, openShareModal } from './panels-extra.js';
+import { openExportModal, openShareModal, openCloudDiagnosticsModal } from './panels-extra.js';
 
 export type PanelName = 'rail' | 'outliner' | 'inspector' | 'timeline' | 'assets' | 'animation' | 'presence';
 
@@ -404,6 +404,14 @@ function buildCommands(): Command[] {
     { id: 'project.versions', title: 'Version History', group: 'Project', icon: '🕘', run: (s) => openVersionsModal(s) },
     { id: 'project.members', title: 'Members & Invites', group: 'Project', icon: '👥', run: (s) => openMembersModal(s) },
     { id: 'project.share', title: 'Share Project…', group: 'Project', icon: '🔗', run: (s) => openShareModal(s) },
+    {
+      id: 'project.cloudDiagnostics',
+      title: 'Cloud Diagnostics',
+      group: 'Project',
+      icon: '☁',
+      keywords: 'supabase storage error sync save broken database',
+      run: (s) => openCloudDiagnosticsModal(s),
+    },
     { id: 'project.shortcuts', title: 'Keyboard Shortcuts', group: 'Project', icon: '⌨', keys: '?', run: () => openShortcutsModal() },
   );
 

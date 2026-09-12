@@ -8,6 +8,7 @@ import { ENVIRONMENT_PRESETS } from '../engine/environments.js';
 import { escapeHtml, pickFiles } from '../lib/utils.js';
 import { isWithinSubtree } from '../state/tree.js';
 import { toast } from './toast.js';
+import { openCloudDiagnosticsModal } from './panels-extra.js';
 
 /** Copy/paste hand-off for transforms (module scope so it survives re-renders). */
 interface TransformClipboard {
@@ -507,6 +508,9 @@ export function buildInspector(s: EditorSession, el: HTMLElement): () => void {
           </div>
         </div>
         <p class="small muted">${s.doc.objects.length} objects · ${s.doc.materials.length} materials · ${s.doc.clips.length} clips · ${s.doc.assets.length} assets</p>
+        <div class="prop-actions wrap">
+          <button class="btn btn-sm" data-io="diag" title="Probe Supabase: tables, storage buckets, invite RPC and Realtime">☁ Cloud diagnostics</button>
+        </div>
         ${
           s.selection.count()
             ? `<p class="small muted">Selected: ${(() => {
@@ -726,6 +730,7 @@ export function buildInspector(s: EditorSession, el: HTMLElement): () => void {
     });
 
     const ioActs: Record<string, () => void> = {
+      diag: () => openCloudDiagnosticsModal(s),
       vis: () => o && s.toggleVisible(o.id),
       lock: () => o && s.toggleLock(o.id),
       dup: () => s.duplicateSelection(),

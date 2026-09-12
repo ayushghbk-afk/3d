@@ -11,6 +11,31 @@
 
 **Code changes do not automatically configure your Supabase database or dashboard settings. Complete the steps below. Never send a service-role key, secret key or database password.**
 
+## 0. Before anything else: run the in-app cloud diagnostics
+
+A `✕ Error` save badge or a "Cloud unavailable" banner used to hide the actual
+server message behind a hover tooltip. The studio now ships a probe that names
+the broken piece:
+
+- **Editor**: click the save badge in the top bar (`✓ Saved` / `✕ Error`), or
+  Inspector → Project → **☁ Cloud diagnostics**, or ⌘K → *Cloud Diagnostics*.
+- **Sign-in screen and the project dashboard**: the **☁ Cloud diagnostics** /
+  **Diagnose** buttons.
+
+It checks, in order: the build configuration, HTTPS reachability of the project,
+the signed-in session, all **15** public tables, the `join_project` RPC, the
+`assets` + `thumbnails` storage buckets, a real storage upload/download/remove
+round-trip, Realtime, and the open project's cloud row. The report ends with a
+one-line next step, and **Copy report** produces plain text you can paste into
+an issue — it never contains the API key.
+
+Everything is read-only except the storage round-trip, which writes one probe
+object at `<project-id>/__diagnostics__/probe.txt` and deletes it again.
+
+Read the report before changing any SQL: it distinguishes a paused project from
+a missing table, a missing bucket, a missing RPC and a policy that blocks
+uploads, and each of those has a different fix below.
+
 ## 1. GitHub Pages: one setting, then merge
 
 1. Open [Repository Settings → Pages](https://github.com/ayushghbk-afk/3d/settings/pages).

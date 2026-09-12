@@ -8,6 +8,12 @@ const config = readSupabaseConfig({
 });
 export const cloudEnabled = config.enabled;
 export const cloudConfigError = config.error;
+/**
+ * Validated public config (URL + browser key). Both values are already shipped
+ * to every browser in the bundle; exposed for the cloud diagnostics probes.
+ * Never write `key` into a log, toast or report — use `keyKind()` instead.
+ */
+export const cloudConfig = config;
 
 let client: SupabaseClient | null = null;
 
