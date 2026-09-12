@@ -111,7 +111,8 @@ ai/
   settings.ts   provider + token settings (on-device IndexedDB, VITE_AI_* defaults)
   factory.ts    provider wiring with custom → free → offline fallbacks
   groq.ts       default Ask assistant (Llama via groq-proxy worker)
-  pollinations.ts  FREE image/texture (Flux) + Ask fallback chat
+  pollinations.ts  FREE image/texture (legacy host: flux alias -> whatever it
+                   actually serves) + keyed gen.pollinations.ai + Ask fallback chat
   gradio.ts     shared Gradio Space client (config/upload/queue/SSE/download)
   sf3d.ts       FREE text→3D (Stable Fast 3D Space, best quality, default)
   triposr.ts    FREE text→3D fallback (TripoSR Space, faster)

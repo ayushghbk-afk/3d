@@ -21,7 +21,7 @@ export interface AiSettings {
   /** Groq proxy base (no trailing path). Empty = built-in default. */
   groqProxyUrl: string;
   groqModel: string;
-  /** Free default: Pollinations Flux image endpoint (no key). */
+  /** Free default: Pollinations legacy image endpoint (no key; FLUX only with a key). */
   imageProvider: 'pollinations' | 'custom';
   imageCustom: CustomEndpoint;
   /** Free default: Stable Fast 3D via Hugging Face Space (no key). */
@@ -32,7 +32,8 @@ export interface AiSettings {
   /** Optional: Hugging Face token shortens TripoSR queue waits. Free at hf.co. */
   hfToken: string;
   /** Optional: Pollinations key (free at enter.pollinations.ai/keys) — uses the
-   * current gen.pollinations.ai API for Ask with higher reliability/limits. */
+   * current gen.pollinations.ai API for Ask (higher reliability/limits) and for
+   * images (real FLUX). Use an app key (`pk_`) — this is a browser-side app. */
   pollinationsKey: string;
   agent: {
     enabled: boolean;

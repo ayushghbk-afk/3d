@@ -198,8 +198,11 @@ Editor → **✨ AI** opens AI Studio:
 
 - **🧊 3D Model** — free text-to-3D (Stable Fast 3D via Hugging Face, no key;
   TripoSR fallback), with an offline primitive mockup when AI is unreachable.
-- **🎨 Texture** — free text-to-texture (Pollinations Flux, no key) applied to
-  any material.
+- **🎨 Texture** — free text-to-texture (Pollinations, no key) applied to any
+  material. The anonymous tier serves ≈1 image / 15 s and no longer runs FLUX
+  (it serves `sana` and the app reports the model that actually ran); add a
+  free key in **⚙️ Setup → Pollinations key** to route images through
+  `gen.pollinations.ai`, where the Black Forest Labs weights live.
 - **🖌️ Paint** — the AI looks at your groups to identify each model and its
   parts, then auto-paints, AI-textures or tidies the whole scene at once.
 - **💬 Ask** — project-grounded Q&A over the live scene summary. Default model
