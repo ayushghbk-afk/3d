@@ -61,40 +61,94 @@ export function attachToParent(
 }
 
 /**
- * Selection highlight: tints the selected object's materials blue, restoring
- * the previous emissive on (de)select. Exported pure for unit tests.
+ * Selection highlight: swaps each selected mesh's material for a highlighted
+ * CLONE (emissive tinted blue) and restores the original on (de)select.
+ * Exported pure for unit tests.
  *
- * The base snapshot MUST be guarded by `=== undefined`: the default emissive
- * is black (0x000000, falsy), and a falsy check re-snapshots the blue
- * highlight itself as the "base" — so deselecting never restores the color.
+ * The old implementation tinted the material IN PLACE — objects sharing one
+ * material (every primitive used to start on `doc.materials[0]`) all lit up
+ * when a single object was selected. Cloning keeps the highlight strictly
+ * per-object and leaves the shared material (and every other user of it)
+ * untouched.
  */
+
+type MaterialOrArray = THREE.Material | THREE.Material[];
+
+/** userData keys for the active highlight override. */
+const HL_ORIG = 'hlOrig';
+const HL_CLONE = 'hlClone';
+
+const HIGHLIGHT_COLOR = 0x2266ff;
+
+function userDataOf(o: THREE.Object3D): Record<string, unknown> {
+  return o.userData as Record<string, unknown>;
+}
+
+function sameMaterial(a: MaterialOrArray | unknown, b: MaterialOrArray | unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((m, i) => m === b[i]);
+  return false;
+}
+
+function disposeMaterial(m: MaterialOrArray | undefined | null): void {
+  if (!m) return;
+  if (Array.isArray(m)) m.forEach((x) => x.dispose());
+  else m.dispose();
+}
+
+/** A highlighted copy of `src`: same look, emissive forced to the selection tint. */
+function highlightedClone(src: THREE.Material): THREE.Material {
+  const clone = src.clone();
+  const std = clone as THREE.MeshStandardMaterial;
+  if ('emissive' in std) {
+    const orig = src as THREE.MeshStandardMaterial;
+    if (std.userData.baseEmissive === undefined) {
+      std.userData.baseEmissive = orig.emissive.getHex();
+      std.userData.baseEmissiveIntensity = orig.emissiveIntensity;
+    }
+    std.userData.highlighted = true;
+    std.emissive.setHex(HIGHLIGHT_COLOR);
+    std.emissiveIntensity = Math.max(0.35, std.userData.baseEmissiveIntensity as number);
+  }
+  return clone;
+}
+
+function highlightedCopies(src: MaterialOrArray): MaterialOrArray {
+  if (Array.isArray(src)) return src.map(highlightedClone);
+  return highlightedClone(src);
+}
+
+/** Rebuild the highlight clone from the mesh's underlying material (no-op when unselected). */
+function refreshMeshHighlight(mesh: THREE.Mesh): void {
+  const ud = userDataOf(mesh);
+  const orig = ud[HL_ORIG] as MaterialOrArray | undefined;
+  if (orig === undefined) return;
+  disposeMaterial(ud[HL_CLONE] as MaterialOrArray | undefined);
+  const copies = highlightedCopies(orig);
+  ud[HL_CLONE] = copies;
+  mesh.material = copies;
+}
+
+function setMeshHighlight(mesh: THREE.Mesh, on: boolean): void {
+  const ud = userDataOf(mesh);
+  if (on) {
+    const saved = ud[HL_ORIG] as MaterialOrArray | undefined;
+    const current = mesh.material as MaterialOrArray;
+    // Already highlighted and the override is still attached — nothing to do.
+    if (saved !== undefined && sameMaterial(current, ud[HL_CLONE])) return;
+    if (saved === undefined) ud[HL_ORIG] = current;
+    refreshMeshHighlight(mesh);
+    return;
+  }
+  if (ud[HL_ORIG] === undefined) return;
+  mesh.material = ud[HL_ORIG] as MaterialOrArray;
+  disposeMaterial(ud[HL_CLONE] as MaterialOrArray | undefined);
+  delete ud[HL_ORIG];
+  delete ud[HL_CLONE];
+}
+
 export function applyOutline(objects: Map<string, THREE.Object3D>, id: string | null): void {
-  objects.forEach((obj, key) => {
-    const on = key === id;
-    obj.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      mats.forEach((m) => {
-        const std = m as THREE.MeshStandardMaterial;
-        if (!('emissive' in std)) return;
-        if (std.userData.baseEmissive === undefined) {
-          std.userData.baseEmissive = std.emissive.getHex();
-          std.userData.baseEmissiveIntensity = std.emissiveIntensity;
-        }
-        std.userData.highlighted = on;
-        // NOTE: shared materials — highlight affects all users; acceptable V1,
-        // replaced by outline-pass in Phase 7.
-        if (on) {
-          std.emissive.setHex(0x2266ff);
-          std.emissiveIntensity = Math.max(0.35, std.userData.baseEmissiveIntensity as number);
-        } else {
-          std.emissive.setHex(std.userData.baseEmissive as number);
-          std.emissiveIntensity = std.userData.baseEmissiveIntensity as number;
-        }
-      });
-    });
-  });
+  applyOutlineSet(objects, id === null ? new Set<string>() : new Set([id]));
 }
 
 /** Multi-selection highlight: tints every member of `ids`, restores the rest. */
@@ -104,23 +158,7 @@ export function applyOutlineSet(objects: Map<string, THREE.Object3D>, ids: Reado
     obj.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      mats.forEach((m) => {
-        const std = m as THREE.MeshStandardMaterial;
-        if (!('emissive' in std)) return;
-        if (std.userData.baseEmissive === undefined) {
-          std.userData.baseEmissive = std.emissive.getHex();
-          std.userData.baseEmissiveIntensity = std.emissiveIntensity;
-        }
-        std.userData.highlighted = on;
-        if (on) {
-          std.emissive.setHex(0x2266ff);
-          std.emissiveIntensity = Math.max(0.35, std.userData.baseEmissiveIntensity as number);
-        } else {
-          std.emissive.setHex(std.userData.baseEmissive as number);
-          std.emissiveIntensity = std.userData.baseEmissiveIntensity as number;
-        }
-      });
+      setMeshHighlight(mesh, on);
     });
   });
 }
@@ -413,6 +451,11 @@ export class Viewport {
 
   syncMaterials(all: MaterialData[]): void {
     this.materials.sync(all);
+    // material edits must stay visible on selected (highlight-overridden) meshes
+    this.scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) refreshMeshHighlight(mesh);
+    });
     this.setShading(this.shading, this.baseEnv);
   }
 
@@ -550,7 +593,11 @@ export class Viewport {
     const mesh = obj as THREE.Mesh;
     if (mesh.isMesh && data.type !== 'imported' && data.type !== 'group') {
       const mat = this.materials.getById(data.materialId);
-      if (mat && mesh.material !== mat) mesh.material = mat;
+      if (mat) {
+        mesh.material = mat;
+        // re-apply the selection highlight if this mesh is selected
+        refreshMeshHighlight(mesh);
+      }
     }
     this.reparent(data);
   }
@@ -576,6 +623,12 @@ export class Viewport {
   removeObject(id: string): void {
     const obj = this.objects.get(id);
     if (!obj) return;
+    obj.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      // drop + dispose any selection-highlight override before teardown
+      setMeshHighlight(mesh, false);
+    });
     obj.parent?.remove(obj);
     disposeGeometry(obj);
     this.objects.delete(id);

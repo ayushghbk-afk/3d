@@ -103,23 +103,25 @@ export async function applyAssetPayload(
     return;
   }
   if (payload.kind === 'texture') {
-    const mats = s.selectionMaterials();
+    // Unique-per-selection materials: a texture dropped on ONE object must not
+    // repaint every other object that happens to share its material.
+    const mats = s.makeSelectionMaterialsUnique();
     if (!mats.length) {
       toast('Select an object with a material first', 'warn');
       return;
     }
     const assetId = payload.assetId;
     if (assetId) {
-      s.setMaterialMap(mats[0].id, 'base', assetId);
+      for (const m of mats) s.setMaterialMap(m.id, 'base', assetId);
       void s.hydrateTextures();
-      toast('Texture applied', 'success');
+      toast(mats.length > 1 ? `Texture applied to ${mats.length} objects` : 'Texture applied', 'success');
       return;
     }
     toast('Generating texture…');
     const blob = await proceduralTextureBlob(payload.id as ProceduralTextureId, 512);
     const file = new File([blob], `${payload.id}.png`, { type: 'image/png' });
-    await s.uploadTexture(mats[0].id, file, 'base');
-    toast('Texture applied', 'success');
+    for (const m of mats) await s.uploadTexture(m.id, file, 'base');
+    toast(mats.length > 1 ? `Texture applied to ${mats.length} objects` : 'Texture applied', 'success');
     return;
   }
   if (payload.kind === 'environment') {
