@@ -639,13 +639,15 @@ export function mountEditor(root: HTMLElement, projectId: string): () => void {
         const created = await s.importGlbFile(f);
         if (created && point) s.setTransform(created.id, point);
       } else if (f.type.startsWith('image/')) {
-        const mats = s.selectionMaterials();
+        // unique-per-selection materials so the image only lands on what the
+        // user selected — never on every object sharing the material
+        const mats = s.makeSelectionMaterialsUnique();
         if (!mats.length) {
           toast('Select an object to texture it', 'warn');
           continue;
         }
         toast(`Applying ${f.name}…`);
-        await s.uploadTexture(mats[0].id, f, 'base');
+        for (const m of mats) await s.uploadTexture(m.id, f, 'base');
         toast('Texture applied', 'success');
       } else if (name.endsWith('.3dproject') || f.type === 'application/json') {
         toast('Reading backup…');
